@@ -56,3 +56,10 @@ Secure Integration into the Core System
 - Scans dependencies for known vulnerabilities (CVEs)
 - Automatically replaces insecure code snippets
 - Outputs validated, security-compliant code
+
+
+🔁 Overall Research Workflow
+
+```
+Developer Prompt → AI Code Generator (Vibe Coding) → Secure-by-Design AI Code Generator → Code Explainability & UML Visualization (CIR → AI + Regex → UML) → Developer Review & Validation → Secure Plugin Isolation (Sandbox + Interface Enforcement) → Secure Communication & Authentication (TLS + JWT + RBAC/ABAC) → Safe Integration into Core System
+```
