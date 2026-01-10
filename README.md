@@ -15,6 +15,17 @@ The framework consists of four tightly integrated components, each addressing a 
 Together, these components create a real-time, security-aware vibe coding ecosystem.
 
 ### 🔐 Secure Plugin Isolation & Interface Enforcement
+Secure Plugin Isolation (Docker Sandbox)
+- Runs AI-generated plugins inside isolated Docker containers to protect the host system and the uploaded core project.
+- Read-only plugin mount: plugin code is mounted as ro so the container cannot modify plugin files.
+- Reusable mode: one container per plugin slug
+- Controlled exposure: plugin runner exposes only a single service port mapped to a random host port.
+- Centralized orchestration: backend manages plugin lifecycle via API endpoints.
+
+Secure Integration into the Core System
+- The uploaded “core system” never executes plugin code directly.
+- Core system pages call the backend endpoint and receive the plugin output safely.
+- Route-to-plugin mapping ensures only the correct plugin appears on its intended page.
 
 
 ### 🔑 Secure Communication & Authentication Mechanism
