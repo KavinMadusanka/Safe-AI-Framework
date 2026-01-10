@@ -58,8 +58,31 @@ Secure Integration into the Core System
 - Outputs validated, security-compliant code
 
 
-🔁 Overall Research Workflow
+## 🔁 Overall Research Workflow
 
 ```
 Developer Prompt → AI Code Generator (Vibe Coding) → Secure-by-Design AI Code Generator → Code Explainability & UML Visualization (CIR → AI + Regex → UML) → Developer Review & Validation → Secure Plugin Isolation (Sandbox + Interface Enforcement) → Secure Communication & Authentication (TLS + JWT + RBAC/ABAC) → Safe Integration into Core System
 ```
+
+### Tools & Technologies
+
+## Programming Languages
+- Python 3.10+ / 3.12 – backend services, orchestration, security analysis
+- TypeScript – frontend development
+- JavaScript (Node.js) – plugin execution runtime
+- Java – code parsing, CIR generation, UML pipeline
+
+## Frontend Technologies
+- React + TypeScript (Vite) – single-page application
+- Axios – backend API communication
+- Fetch API – prompt submission
+- Tailwind CSS / inline design tokens – UI styling
+- Custom UML Viewer – SVG rendering using dangerouslySetInnerHTML
+
+## Backend Technologies
+- FastAPI – REST API framework
+- Uvicorn – ASGI server
+- Pydantic – request/response validation
+- python-dotenv – environment variable management
+- HTTPX / Requests – service-to-service communication
+- CORS Middleware – secure frontend-backend communication
