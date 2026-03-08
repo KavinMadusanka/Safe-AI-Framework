@@ -617,6 +617,33 @@ def docker_urls():
         out[rel] = _ports_to_urls(ports)
     return {"urls": out}
 
+@app.get("/core/docker/ready", summary="Instant single-probe: is localhost:port responding?")
+def docker_ready(
+    port: int = Query(..., description="Host port to probe"),
+):
+    """
+    Non-blocking single probe — tries to connect to http://127.0.0.1:<port>
+    once with a short timeout. Returns {"ready": true/false} immediately.
+    The frontend should call this repeatedly on a short interval.
+    """
+    import http.client
+
+    conn: http.client.HTTPConnection | None = None
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+        conn.request("HEAD", "/")
+        conn.getresponse()
+        return {"ready": True, "port": port}
+    except Exception:
+        return {"ready": False, "port": port}
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 @app.post("/core/docker/stop", summary="Stop & remove ONE container by subdir")
 def docker_stop(subdir: str = Query(..., description="The subdir key you used when starting")):
     _ensure_docker()
