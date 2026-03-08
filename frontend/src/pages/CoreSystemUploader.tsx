@@ -220,7 +220,9 @@ function Dashboard() {
   // Live URLs
   const [frontUrl, setFrontUrl] = useState<string>("");
   const [backUrl, setBackUrl] = useState<string>("");
-  // const [showPreview, setShowPreview] = useState<boolean>(true);
+  const [coreStarting, setCoreStarting] = useState<boolean>(false);
+  const readyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // const [showPreview, setShowPreview] = useState<boolean>(false);
 
   // Plugin modal
   const [showPluginModal, setShowPluginModal] = useState(false);
@@ -339,6 +341,11 @@ async function onStopPlugin(name?: string) {
       loadNodeCandidates().catch(() => {}),
       dockerList().catch(() => {}),
     ]);
+
+    // Cleanup readiness polling on unmount
+    return () => {
+      if (readyPollRef.current) { clearInterval(readyPollRef.current); readyPollRef.current = null; }
+    };
   }, []);
 
   // Upload folder
@@ -506,16 +513,52 @@ async function onStopPlugin(name?: string) {
       return;
     }
 
+    // Stop any previous polling timer
+    if (readyPollRef.current) { clearInterval(readyPollRef.current); readyPollRef.current = null; }
+
     setBusy(true);
+    setCoreStarting(true);
     try {
       await axios.post(`${API}/core/docker/start-both`, { apps });
-      await dockerList();
-      alert("Started selected subdirs in Docker.");
+      await dockerList(); // record port mappings immediately
     } catch (e: any) {
       alert(e?.response?.data?.detail ?? e.message ?? "Docker start failed");
-    } finally {
       setBusy(false);
+      setCoreStarting(false);
+      return;
     }
+    setBusy(false);
+
+    // Start fast frontend-driven readiness polling (every 800 ms).
+    // The backend /core/docker/ready endpoint is a single instant probe
+    // that returns {ready: true/false} without blocking.
+    const portToCheck = dockerFrontPort || "3000";
+    let elapsed = 0;
+    const INTERVAL = 800;
+    const MAX_MS = 120_000; // give up after 2 min
+
+    readyPollRef.current = setInterval(async () => {
+      elapsed += INTERVAL;
+      try {
+        const { data } = await axios.get(`${API}/core/docker/ready`, {
+          params: { port: portToCheck },
+          timeout: 2_000,
+        });
+        if (data?.ready) {
+          // Service is up — stop polling and refresh URLs
+          if (readyPollRef.current) { clearInterval(readyPollRef.current); readyPollRef.current = null; }
+          await dockerList();
+          setCoreStarting(false);
+        }
+      } catch {
+        // network glitch — just retry on next tick
+      }
+      if (elapsed >= MAX_MS && readyPollRef.current) {
+        clearInterval(readyPollRef.current);
+        readyPollRef.current = null;
+        setCoreStarting(false);
+      }
+    }, INTERVAL);
   }
 
   async function dockerList() {
@@ -546,7 +589,9 @@ async function onStopPlugin(name?: string) {
 
   async function dockerStopAll() {
     if (!confirm("Stop and remove ALL containers started by this tool?")) return;
+    if (readyPollRef.current) { clearInterval(readyPollRef.current); readyPollRef.current = null; }
     setBusy(true);
+    setCoreStarting(false);
     try {
       await axios.post(`${API}/core/docker/stop-all`);
       await dockerList();
@@ -671,6 +716,23 @@ async function onStopPlugin(name?: string) {
         >
           Stop All Containers
         </button> */}
+        {/* Core-system startup status / ready link */}
+        {coreStarting && (
+          <span style={{ fontSize: 12, color: "#a78bfa", padding: "0 4px" }}>
+            Starting Core System…
+          </span>
+        )}
+        {frontUrl && !coreStarting && (
+          <a
+            href={frontUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ ...navBtn, textDecoration: "none", background: "#166534", border: "#166534", color: "#86efac" }}
+          >
+            Open Core System ↗
+          </a>
+        )}
+
         <button
           onClick={() => navigate("/PluginRegistryPage")}
           style={navBtn}
