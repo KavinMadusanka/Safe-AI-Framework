@@ -329,8 +329,16 @@ async function onStopPlugin(name?: string) {
     setStatus(data);
   }
   useEffect(() => {
-    refresh();
-    refreshRunningPlugins();
+    // Fire all initialization requests in parallel instead of waiting for
+    // status first and then triggering tree/candidates/docker as a second
+    // round-trip. Tree and candidates silently handle 404 if no project exists.
+    Promise.all([
+      refresh(),
+      refreshRunningPlugins(),
+      loadTree("").catch(() => {}),
+      loadNodeCandidates().catch(() => {}),
+      dockerList().catch(() => {}),
+    ]);
   }, []);
 
   // Upload folder
