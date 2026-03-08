@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import requests
 
-from plugin_manager import start_plugin_container, stop_plugin_container, get_plugin_host_port, delete_plugin, PLUGINS_ROOT
+from plugin_manager import start_plugin_container, stop_plugin_container, get_plugin_host_port, delete_plugin, list_running_plugins, PLUGINS_ROOT
 from interface_enforcer import enforce_interface
 
 router = APIRouter()
@@ -121,6 +121,15 @@ def stop_plugin(body: StopPayload):
         return {"ok": True, "stopped": stop_plugin_container(body.slug, body.instance_id)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/running")
+def get_running_plugins():
+    """
+    Returns the list of currently running plugin containers with their slug and base URL.
+    Used by the frontend to restore the running-plugins list after navigation/reload.
+    """
+    return {"running": list_running_plugins()}
 
 
 @router.delete("/{slug}")
