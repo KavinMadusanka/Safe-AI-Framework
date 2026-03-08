@@ -138,10 +138,18 @@ SECURE_GATEWAY_URL = "http://127.0.0.1:8012"
 @router.delete("/{slug}")
 def delete_plugin_route(slug: str):
     """
-    Permanently deletes the plugin folder (manifest.json, entry.js, and all contents)
-    from ai_plugins. Path traversal is prevented by plugin_manager.delete_plugin.
+    Stops the plugin container (if running), then permanently deletes the plugin
+    folder (manifest.json, entry.js, and all contents) from ai_plugins.
+    Path traversal is prevented by plugin_manager.delete_plugin.
     After deleting the folder, removes the plugin record from the Secure Gateway database.
     """
+    # Stop the container first — safe to call even if not running
+    try:
+        stop_plugin_container(slug)
+    except Exception as stop_err:
+        # Not a fatal error — log and continue with deletion
+        print(f"[WARN] Could not stop container for '{slug}' before delete: {stop_err}")
+
     try:
         delete_plugin(slug)
     except FileNotFoundError as e:
