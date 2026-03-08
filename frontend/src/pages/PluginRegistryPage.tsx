@@ -1,6 +1,7 @@
 // SAFE-AI-FRAMEWORK/frontend/src/PluginRegistryPage.tsx
 
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 
 const API = import.meta.env.VITE_API_URL ?? "http://localhost:8012";
 
@@ -28,6 +29,7 @@ function normaliseStatus(
 }
 
 export default function PluginRegistryPage() {
+  const navigate = useNavigate();
   const [view, setView] = useState<"card" | "table">("card");
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [loading, setLoading] = useState(true);
@@ -98,19 +100,22 @@ export default function PluginRegistryPage() {
             </div>
           </div>
 
-          <div style={viewSwitch}>
-            <button
-              style={view === "card" ? activeTab : tab}
-              onClick={() => setView("card")}
-            >
-              Card View
-            </button>
-            <button
-              style={view === "table" ? activeTab : tab}
-              onClick={() => setView("table")}
-            >
-              Table View
-            </button>
+          <div style={rightControls}>
+            <div style={viewSwitch}>
+              <button
+                style={view === "card" ? activeTab : tab}
+                onClick={() => setView("card")}
+              >
+                Card View
+              </button>
+              <button
+                style={view === "table" ? activeTab : tab}
+                onClick={() => setView("table")}
+              >
+                Table View
+              </button>
+            </div>
+            <button style={ navBtn } onClick={() => navigate("/")}>Core Uploader & Runner</button>
           </div>
         </div>
 
@@ -387,6 +392,12 @@ const viewSwitch = {
   verticalAlign: "middle",
 };
 
+const rightControls: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+};
+
 const tab = {
   padding: "0 14px",
   height: "100%",
@@ -571,4 +582,15 @@ const tableTrustFill: React.CSSProperties = {
   height: "100%",
   borderRadius: 6,
   transition: "width 0.3s ease",
+};
+
+const navBtn = {
+  minWidth: 38,
+  minHeight: 38,
+  padding: "6px 12px",
+  borderRadius: 6,
+  border: "#4F0C87",
+  background: "#4F0C87",
+  color: "white",
+  cursor: "pointer",
 };
