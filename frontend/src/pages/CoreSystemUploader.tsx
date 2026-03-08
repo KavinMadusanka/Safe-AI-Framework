@@ -134,25 +134,26 @@ const Modal: React.FC<{
           width,
           maxWidth: "95vw",
           maxHeight: "90vh",
-          background: "#ffffff",
+          background: "#1a1328",
           borderRadius: 12,
-          border: "1px solid #e2e8f0",
+          border: "1px solid #2e1065",
           boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
           overflow: "hidden",
           display: "flex",
           flexDirection: "column",
+          color: "white",
         }}
       >
         <div
           style={{
             padding: "14px 16px",
-            borderBottom: "1px solid #e2e8f0",
+            borderBottom: "1px solid #2e1065",
             display: "flex",
             alignItems: "center",
             gap: 8,
           }}
         >
-          <div style={{ fontWeight: 800, fontSize: 16, color: "#0f172a" }}>
+          <div style={{ fontWeight: 800, fontSize: 16, color: "white" }}>
             {title || "Dialog"}
           </div>
           <button
@@ -165,14 +166,14 @@ const Modal: React.FC<{
               cursor: "pointer",
               fontSize: 22,
               lineHeight: 1,
-              color: "#334155",
+              color: "#e2e8f0",
             }}
             title="Close"
           >
             ×
           </button>
         </div>
-        <div style={{ padding: 16, overflow: "auto" }}>{children}</div>
+        <div style={{ padding: 16, overflow: "auto", background: "#1a1328" }}>{children}</div>
       </div>
     </div>
   );

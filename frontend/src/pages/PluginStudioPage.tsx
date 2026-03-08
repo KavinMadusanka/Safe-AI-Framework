@@ -123,7 +123,7 @@ export default function PluginStudioPage({
       display: "flex",
       gap: 24,
       width: "100%",
-      color: "#1a1328",
+      color: "white",
     }}
   >
     {/* LEFT SIDE */}
