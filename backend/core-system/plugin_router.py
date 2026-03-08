@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import requests
 
-from plugin_manager import start_plugin_container, stop_plugin_container, get_plugin_host_port, PLUGINS_ROOT
+from plugin_manager import start_plugin_container, stop_plugin_container, get_plugin_host_port, delete_plugin, list_running_plugins, PLUGINS_ROOT
 from interface_enforcer import enforce_interface
 
 router = APIRouter()
