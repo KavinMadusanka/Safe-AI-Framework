@@ -35,6 +35,7 @@ export default function PluginRegistryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string | null>(null);
+  const [search, setSearch] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +77,9 @@ export default function PluginRegistryPage() {
   }, []);
 
   const filteredPlugins = plugins.filter((p) => {
+    // Search by plugin id first (case-insensitive)
+    if (search && !p.id.toLowerCase().includes(search.toLowerCase())) return false;
+
     if (!filter) return true;
     // 'ALL PLUGINS' card should show everything when selected
     if (filter === "ALL PLUGINS") return true;
@@ -101,6 +105,26 @@ export default function PluginRegistryPage() {
           </div>
 
           <div style={rightControls}>
+            <div style={searchWrapper}>
+              <svg
+                viewBox="0 0 24 24"
+                width={16}
+                height={16}
+                style={searchIcon}
+                aria-hidden
+              >
+                <path
+                  fill="currentColor"
+                  d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zM10 14a4 4 0 110-8 4 4 0 010 8z"
+                />
+              </svg>
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search plugin id"
+                style={searchInputWithIcon}
+              />
+            </div>
             <div style={viewSwitch}>
               <button
                 style={view === "card" ? activeTab : tab}
@@ -421,6 +445,41 @@ const activeTab = {
   border: "1px solid rgba(79,12,135,0.2)",
   color: "#fff",
   boxShadow: "inset 0 -2px 0 rgba(0,0,0,0.12)",
+};
+
+const searchInput: React.CSSProperties = {
+  padding: "6px 10px",
+  borderRadius: 8,
+  border: "1px solid #2d1f55",
+  background: "#0f0820",
+  color: "white",
+  outline: "none",
+  width: 500,
+  marginRight: 8,
+};
+
+const searchWrapper: React.CSSProperties = {
+  position: "relative",
+  display: "inline-flex",
+  alignItems: "center",
+  marginRight: 8,
+};
+
+const searchIcon: React.CSSProperties = {
+  position: "absolute",
+  left: 8,
+  color: "#9ca3af",
+  pointerEvents: "none",
+};
+
+const searchInputWithIcon: React.CSSProperties = {
+  padding: "6px 10px 6px 32px",
+  borderRadius: 8,
+  border: "1px solid #2d1f55",
+  background: "#0f0820",
+  color: "white",
+  outline: "none",
+  width: 220,
 };
 
 const metricsGrid: React.CSSProperties = {
