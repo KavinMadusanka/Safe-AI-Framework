@@ -184,13 +184,18 @@ def core_tree(dir: str = ""):
     if not base.exists() or not base.is_dir():
         raise HTTPException(404, detail="Folder not found")
 
-    items = []
-    for entry in sorted(base.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
-        items.append({
-            "name": entry.name,
-            "path": str(entry.relative_to(PROJECT_DIR)),
-            "type": "file" if entry.is_file() else "dir",
-        })
+    # os.scandir caches is_file/is_dir from the OS directory listing
+    # avoiding a separate stat() call per entry
+    with os.scandir(str(base)) as scanner:
+        entries = sorted(scanner, key=lambda e: (e.is_file(), e.name.lower()))
+        items = [
+            {
+                "name": e.name,
+                "path": str(Path(e.path).relative_to(PROJECT_DIR)),
+                "type": "file" if e.is_file() else "dir",
+            }
+            for e in entries
+        ]
     return {"cwd": str(base.relative_to(PROJECT_DIR)), "items": items}
 
 @app.get("/core/file")
@@ -233,20 +238,30 @@ def create_plugin(
 @app.get("/core/plugins")
 def list_plugins():
     out = []
-    for mf in PLUGINS_DIR.rglob("manifest.json"):
-        try:
-            data = json.loads(mf.read_text(encoding="utf-8"))
-            name = data.get("name") or mf.parent.name
-            out.append({
-                "name": name,
-                "title": data.get("title", name),
-                "path": str(mf.parent.relative_to(PLUGINS_DIR)),
-                "entry": data.get("entry", "entry.js"),
-                "runtime": data.get("runtime", "browser"),
-                "permissions": data.get("permissions", []),
-            })
-        except Exception:
-            pass
+    if not PLUGINS_DIR.exists():
+        return {"plugins": out}
+    # Plugins are always exactly one level deep: ai_plugins/<slug>/manifest.json
+    # Use os.scandir for a single shallow scan instead of recursive rglob
+    with os.scandir(str(PLUGINS_DIR)) as scanner:
+        for entry in scanner:
+            if not entry.is_dir():
+                continue
+            mf = Path(entry.path) / "manifest.json"
+            if not mf.exists():
+                continue
+            try:
+                data = json.loads(mf.read_text(encoding="utf-8"))
+                name = data.get("name") or entry.name
+                out.append({
+                    "name": name,
+                    "title": data.get("title", name),
+                    "path": entry.name,
+                    "entry": data.get("entry", "entry.js"),
+                    "runtime": data.get("runtime", "browser"),
+                    "permissions": data.get("permissions", []),
+                })
+            except Exception:
+                pass
     return {"plugins": out}
 
 # ==============================================================================
