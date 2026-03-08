@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import requests
 
-from plugin_manager import start_plugin_container, stop_plugin_container, get_plugin_host_port, PLUGINS_ROOT
+from plugin_manager import start_plugin_container, stop_plugin_container, get_plugin_host_port, delete_plugin, PLUGINS_ROOT
 from interface_enforcer import enforce_interface
 
 router = APIRouter()
@@ -119,5 +119,22 @@ class StopPayload(BaseModel):
 def stop_plugin(body: StopPayload):
     try:
         return {"ok": True, "stopped": stop_plugin_container(body.slug, body.instance_id)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{slug}")
+def delete_plugin_route(slug: str):
+    """
+    Permanently deletes the plugin folder (manifest.json, entry.js, and all contents)
+    from ai_plugins. Path traversal is prevented by plugin_manager.delete_plugin.
+    """
+    try:
+        delete_plugin(slug)
+        return {"ok": True, "deleted": slug}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

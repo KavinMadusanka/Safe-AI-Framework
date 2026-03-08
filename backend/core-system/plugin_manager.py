@@ -1,6 +1,7 @@
 import time
 import re
 import uuid
+import shutil
 from pathlib import Path
 import docker
 
@@ -148,3 +149,21 @@ def get_plugin_host_port(container) -> str:
             f"Container '{container.name}' port binding exists but HostPort is empty."
         )
     return host_port
+
+
+def delete_plugin(slug: str) -> Path:
+    """
+    Deletes the plugin directory for the given slug recursively.
+    Returns the path that was deleted.
+    Raises FileNotFoundError if the plugin does not exist.
+    Raises ValueError on invalid slug or path traversal attempt.
+    """
+    slug = _sanitize_slug(slug)
+    p = (PLUGINS_ROOT / slug).resolve()
+    # Prevent path traversal: p must be a direct child of PLUGINS_ROOT
+    if PLUGINS_ROOT not in p.parents:
+        raise ValueError(f"Path traversal detected: {p}")
+    if not p.exists():
+        raise FileNotFoundError(f"Plugin '{slug}' not found.")
+    shutil.rmtree(p)
+    return p
