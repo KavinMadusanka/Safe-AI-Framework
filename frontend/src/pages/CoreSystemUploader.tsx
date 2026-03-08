@@ -136,7 +136,7 @@ const Modal: React.FC<{
           maxHeight: "90vh",
           background: "#1a1328",
           borderRadius: 12,
-          border: "1px solid #2e1065",
+          border: "1px solid #0f0b1a",
           boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
           overflow: "hidden",
           display: "flex",
@@ -230,6 +230,21 @@ function Dashboard() {
   const [runningPlugins, setRunningPlugins] = useState<
     { name: string; url: string }[]
   >([]);
+
+  async function refreshRunningPlugins() {
+    try {
+      const { data } = await axios.get(`${API}/core/plugins/running`);
+      const list: { name: string; url: string }[] = (data.running ?? []).map(
+        (entry: { slug: string; base_url: string }) => ({
+          name: entry.slug,
+          url: entry.base_url,
+        })
+      );
+      setRunningPlugins(list);
+    } catch {
+      // silently ignore — not critical
+    }
+  }
 // const [pluginBaseUrl, setPluginBaseUrl] = useState<string>("");
 // const [pluginResult, setPluginResult] = useState<string>("");
 
@@ -255,6 +270,7 @@ function Dashboard() {
       });
 
       setSelectedPlugin("");
+      await refreshRunningPlugins();
     } catch (err: any) {
       alert(err?.message ?? "Failed to start plugin");
     }
@@ -288,10 +304,11 @@ async function onStopPlugin(name?: string) {
   try {
     await stopPlugin({ slug: pluginName });
 
-    // Remove from running list
+    // Remove from running list immediately, then confirm with backend
     setRunningPlugins((prev) =>
       prev.filter((p) => p.name !== pluginName)
     );
+    await refreshRunningPlugins();
 
     // If stopped via input, clear input
     if (!name) {
@@ -313,6 +330,7 @@ async function onStopPlugin(name?: string) {
   }
   useEffect(() => {
     refresh();
+    refreshRunningPlugins();
   }, []);
 
   // Upload folder
