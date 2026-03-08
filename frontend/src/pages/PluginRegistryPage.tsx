@@ -9,7 +9,7 @@ type Plugin = {
   role: string;
   intent: string;
   trustScore: number;
-  status: "trusted" | "restricted" | "blocked" | "anomalous";
+  status: "active" | "restricted" | "blocked" | "revoked";
   anomalyFlag?: boolean;
   lastActive: string;
   reqRate: string;
@@ -20,13 +20,11 @@ function normaliseStatus(
   status: string,
   anomalyFlag?: boolean
 ): Plugin["status"] {
-  if (anomalyFlag) return "anomalous";
-  const map: Record<string, Plugin["status"]> = {
-    trusted: "trusted",
-    restricted: "restricted",
-    blocked: "blocked",
-  };
-  return map[status] ?? "blocked";
+  // Map backend values to UI-friendly statuses
+  if (status === "trusted") return "active";
+  if (status === "restricted") return "restricted";
+  if (status === "blocked") return anomalyFlag ? "revoked" : "blocked";
+  return "blocked";
 }
 
 export default function PluginRegistryPage() {
@@ -79,10 +77,10 @@ export default function PluginRegistryPage() {
     if (!filter) return true;
     // 'ALL PLUGINS' card should show everything when selected
     if (filter === "ALL PLUGINS") return true;
-    if (filter === "ACTIVE") return p.status === "trusted";
+    if (filter === "ACTIVE") return p.status === "active";
     if (filter === "RESTRICTED") return p.status === "restricted";
-    if (filter === "BLOCKED") return p.status === "blocked" && !p.anomalyFlag;
-    if (filter === "REVOKED") return p.status === "blocked" && Boolean(p.anomalyFlag);
+    if (filter === "BLOCKED") return p.status === "blocked";
+    if (filter === "REVOKED") return p.status === "revoked";
     return true;
   });
 
@@ -123,12 +121,10 @@ export default function PluginRegistryPage() {
             const avg = total
               ? (plugins.reduce((s, p) => s + p.trustScore, 0) / total).toFixed(1)
               : "0.0";
-            const active = plugins.filter((p) => p.status === "trusted").length;
+            const active = plugins.filter((p) => p.status === "active").length;
             const restricted = plugins.filter((p) => p.status === "restricted").length;
-            const blocked = plugins.filter(
-              (p) => p.status === "blocked" && !p.anomalyFlag
-            ).length;
-            const revoked = plugins.filter((p) => p.anomalyFlag && p.status === "blocked").length;
+            const blocked = plugins.filter((p) => p.status === "blocked").length;
+            const revoked = plugins.filter((p) => p.status === "revoked").length;
 
             const entries: [string, string | number][] = [
               ["ALL PLUGINS", total],
@@ -139,7 +135,7 @@ export default function PluginRegistryPage() {
               ["REVOKED", revoked],
             ];
 
-            const colors = ["", "", "#22c55e", "#f59e0b", "#ef4444", "#ef4444"];
+            const colors = ["", "", "#50B848", "#f59e0b", "#D30027", "#D30027"];
             const isFilterable = (i: number) => i === 0 || (i >= 2 && i <= 5);
 
             return entries.map(([label, value], i) => {
@@ -173,7 +169,7 @@ export default function PluginRegistryPage() {
           <div style={centeredMsg}>Loading plugins…</div>
         )}
         {error && (
-          <div style={{ ...centeredMsg, color: "#ef4444" }}>
+          <div style={{ ...centeredMsg, color: "#D30027" }}>
             ⚠ {error}
           </div>
         )}
@@ -218,10 +214,10 @@ export default function PluginRegistryPage() {
                               width: `${p.trustScore}%`,
                               background:
                                 p.trustScore >= 70
-                                  ? "#22c55e"
+                                  ? "#50B848"
                                   : p.trustScore >= 40
                                   ? "#f59e0b"
-                                  : "#ef4444",
+                                  : "#D30027",
                             }}
                           />
                         </div>
@@ -245,7 +241,7 @@ export default function PluginRegistryPage() {
 
       {/* FOOTER STATUS BAR */}
       <div style={footer}>
-        <div style={{ color: "#22c55e" }}>● REGISTRY ONLINE</div>
+        <div style={{ color: "#50B848" }}>● REGISTRY ONLINE</div>
         <div style={{ opacity: 0.6 }}>ZERO TRUST ENFORCED</div>
         <div style={{ opacity: 0.6 }}>SCAN FREQUENCY: 5s</div>
         <div style={{ color: "#a855f7" }}>v4.2.0-SECURE</div>
@@ -259,10 +255,10 @@ export default function PluginRegistryPage() {
 function PluginCard({ plugin }: { plugin: Plugin }) {
   const color =
     plugin.trustScore >= 70
-      ? "#22c55e"
+      ? "#50B848"
       : plugin.trustScore >= 40
       ? "#f59e0b"
-      : "#ef4444";
+      : "#D30027";
 
   return (
     <div style={pluginCard}>
@@ -311,10 +307,10 @@ function PluginCard({ plugin }: { plugin: Plugin }) {
 
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, { bg: string; color: string }> = {
-    trusted: { bg: "#22c55e33", color: "#22c55e" },
+    active: { bg: "#22c55e33", color: "#50B848" },
     restricted: { bg: "#f59e0b33", color: "#f59e0b" },
-    anomalous: { bg: "#eab30833", color: "#eab308" },
-    blocked: { bg: "#ef444433", color: "#ef4444" },
+    revoked: { bg: "#D3002725", color: "#D30027" },
+    blocked: { bg: "#D3002725", color: "#D30027" },
   };
   const s = styles[status] ?? styles.blocked;
 
