@@ -1164,6 +1164,33 @@ async def metrics_performance(db: Session = Depends(get_db)):
     }
 
 
+@app.delete("/gateway/plugins/{plugin_id}")
+async def delete_plugin_record(plugin_id: str, db: Session = Depends(get_db)):
+    """
+    Removes a plugin and all associated records from gateway.db,
+    then removes all CA records from ca_service.db.
+    Called by the Core System after deleting the plugin folder.
+    Always proceeds with both cleanups even if the plugin is absent from
+    gateway.db (e.g. a cert was issued but the plugin was never onboarded).
+    """
+    # Delete from gateway.db — SQLAlchemy .delete() is a no-op when no rows match.
+    db.query(RequestLog).filter(RequestLog.plugin_id == plugin_id).delete()
+    db.query(TrustEvent).filter(TrustEvent.plugin_id == plugin_id).delete()
+    db.query(Plugin).filter(Plugin.plugin_id == plugin_id).delete()
+    db.commit()
+
+    # Always clean up CA service records regardless of gateway presence.
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            ca_resp = await client.delete(f"{CA_SERVICE_URL}/ca/plugins/{plugin_id}")
+            if ca_resp.status_code not in (200, 404):
+                print(f"[WARN] CA cleanup returned {ca_resp.status_code}: {ca_resp.text}")
+    except Exception as ca_err:
+        print(f"[WARN] Could not reach CA Service for cleanup: {ca_err}")
+
+    return {"ok": True, "deleted": plugin_id}
+
+
 @app.api_route("/core/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def core_proxy(path: str, request: Request):
     return await _proxy_request(request, CORE_SYSTEM_URL, f"/core/{path}")

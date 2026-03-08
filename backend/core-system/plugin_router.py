@@ -121,3 +121,47 @@ def stop_plugin(body: StopPayload):
         return {"ok": True, "stopped": stop_plugin_container(body.slug, body.instance_id)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/running")
+def get_running_plugins():
+    """
+    Returns the list of currently running plugin containers with their slug and base URL.
+    Used by the frontend to restore the running-plugins list after navigation/reload.
+    """
+    return {"running": list_running_plugins()}
+
+
+SECURE_GATEWAY_URL = "http://127.0.0.1:8012"
+
+
+@router.delete("/{slug}")
+def delete_plugin_route(slug: str):
+    """
+    Permanently deletes the plugin folder (manifest.json, entry.js, and all contents)
+    from ai_plugins. Path traversal is prevented by plugin_manager.delete_plugin.
+    After deleting the folder, removes the plugin record from the Secure Gateway database.
+    """
+    try:
+        delete_plugin(slug)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Best-effort: remove the plugin record from the Secure Gateway database.
+    # A 404 means the plugin was never registered there, which is not an error.
+    try:
+        gw_resp = requests.delete(
+            f"{SECURE_GATEWAY_URL}/gateway/plugins/{slug}",
+            timeout=5,
+        )
+        if gw_resp.status_code not in (200, 404):
+            # Log but do not fail — the folder is already gone
+            print(f"[WARN] Gateway cleanup returned {gw_resp.status_code}: {gw_resp.text}")
+    except Exception as gw_err:
+        print(f"[WARN] Could not reach Secure Gateway for cleanup: {gw_err}")
+
+    return {"ok": True, "deleted": slug}

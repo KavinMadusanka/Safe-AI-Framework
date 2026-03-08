@@ -410,3 +410,23 @@ def get_ca_stats(db: Session = Depends(get_db)):
         "revoked_certificates": revoked_certs,
         "total_verifications": total_verifications
     }
+
+
+@app.delete("/ca/plugins/{plugin_id}")
+def delete_plugin_records(plugin_id: str, db: Session = Depends(get_db)):
+    """
+    Removes all CA records for a plugin from ca_service.db.
+    Called by the Core System (via Secure Gateway) when a plugin is deleted.
+    """
+    issued_deleted = db.query(IssuedCertificate).filter(IssuedCertificate.plugin_id == plugin_id).delete()
+    audit_deleted = db.query(CertificateAuditLog).filter(CertificateAuditLog.plugin_id == plugin_id).delete()
+    revoked_deleted = db.query(RevokedCertificate).filter(RevokedCertificate.plugin_id == plugin_id).delete()
+    db.commit()
+
+    return {
+        "ok": True,
+        "deleted": plugin_id,
+        "issued_certificates_removed": issued_deleted,
+        "audit_log_entries_removed": audit_deleted,
+        "revoked_certificates_removed": revoked_deleted,
+    }
