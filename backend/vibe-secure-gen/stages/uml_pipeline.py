@@ -502,7 +502,7 @@ def run_uml_pipeline_over_blob(code_blob: str) -> Dict[str, Any]:
         _step_header(1, 5, "FILE MATERIALISATION", _T.BLUE)
 
         fence_lang, _ = strip_fence(code_blob)
-        _info("Fence language detected", fence_lang or "none")
+        #_info("Fence language detected", fence_lang or "none")
 
         with tempfile.TemporaryDirectory() as td:
             t0 = time.time()
