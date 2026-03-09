@@ -11,10 +11,6 @@ VISIBILITY_MAP = {
     "package": "~",
 }
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Architecture layer ordering
-#  Lower number = higher in the call stack (client-side / entry point)
-# ──────────────────────────────────────────────────────────────────────────────
 _LAYER_ORDER: Dict[str, int] = {
     "client":      5,
     "controller":  10,
@@ -51,19 +47,14 @@ _LAYER_ORDER: Dict[str, int] = {
 
 
 def _layer_order(type_name: str, package: str) -> int:
-    """Return architectural layer order for a type. Lower = earlier caller."""
     combined = (type_name + " " + (package or "")).lower()
-    best = 55  # default: middle
+    best = 55
     for keyword, order in _LAYER_ORDER.items():
         if keyword in combined:
             if order < best:
                 best = order
     return best
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Low-level CIR helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _index_cir(cir: Dict[str, Any]):
     nodes_by_id: Dict[str, Dict[str, Any]] = {
@@ -132,7 +123,6 @@ def _clean_type_for_display(raw_type: str) -> str:
 
 
 def _clean_type_short(raw_type: str) -> str:
-    """Strip generics entirely, just keep base name."""
     if not raw_type:
         return ""
     t = re.sub(r"<.*?>", "", raw_type)
@@ -168,10 +158,6 @@ def _safe_sequence_label(method_name: str) -> str:
         return f"{safe}()"
     return f"{method_name}()"
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Infrastructure-noise filter
-# ──────────────────────────────────────────────────────────────────────────────
 
 _NOISE_NAME_SUFFIXES: Tuple[str, ...] = (
     "exception", "error",
@@ -474,6 +460,9 @@ def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
                        and m.get("name", "").lower() not in _TRIVIAL_NAMES]
         return len(non_trivial) == 0
 
+    # ── CHANGE 1: separate model_types and noise_types; only exclude noise ──
+    # model_types are kept as participants (rendered with "entity" keyword).
+    # noise_types (Config, Util, Logger, etc.) are still fully excluded.
     model_types: Set[str] = {t for t in type_attrs if _is_model(t)}
     noise_types: Set[str] = {
         t for t in type_attrs
@@ -482,7 +471,7 @@ def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
             type_attrs[t].get("package", ""),
         )
     }
-    excluded_types: Set[str] = model_types | noise_types
+    excluded_types: Set[str] = noise_types  # models are NO LONGER excluded
 
     def layer(tid: str) -> int:
         a = type_attrs[tid]
@@ -504,8 +493,9 @@ def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
             chain.extend(build_chain(hop, visited | {hop}))
         return chain
 
-    non_model    = [t for t in type_attrs if t not in excluded_types]
-    sorted_types = sorted(non_model, key=lambda t: (incoming.get(t, 0), layer(t), type_attrs[t].get("name", "")))
+    # ── CHANGE 2: include all non-noise types (including models) ───────────
+    all_active  = [t for t in type_attrs if t not in excluded_types]
+    sorted_types = sorted(all_active, key=lambda t: (incoming.get(t, 0), layer(t), type_attrs[t].get("name", "")))
 
     covered: Set[str] = set()
     chains:  List[List[str]] = []
@@ -524,21 +514,41 @@ def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
             if tid not in seen:
                 seen.add(tid)
                 ordered.append(tid)
-    for tid in sorted(non_model, key=layer):
+    for tid in sorted(all_active, key=layer):
         if tid not in seen:
             ordered.append(tid)
 
+    # ── CHANGE 3: _participant_keyword — BCE pattern with entity support ────
+    # Priority order matters:
+    #   database  BEFORE  control  (fixes DatabaseManager → cylinder, not arrow)
+    #   entity    AFTER   database (DAOs are database, models are entity)
     def _participant_keyword(tid: str) -> str:
         a   = type_attrs[tid]
         nm  = (a.get("name")    or "").lower()
         pkg = (a.get("package") or "").lower()
         combined = nm + " " + pkg
-        if any(k in combined for k in ("controller", "resource", "endpoint", "rest", "handler", "boundary", "api")):
-            return "boundary"
-        if any(k in combined for k in ("service", "manager", "interactor", "usecase", "business", "facade")):
-            return "control"
-        if any(k in combined for k in ("dao", "repository", "repo", "database", "db", "persistence", "store", "gateway")):
+
+        # 1. DATABASE — must be before "manager"/"service" to catch DatabaseManager
+        if any(k in combined for k in ("dao", "repository", "repo", "database", "db",
+                                        "persistence", "store", "gateway")):
             return "database"
+
+        # 2. BOUNDARY — REST controllers / API handlers
+        if any(k in combined for k in ("controller", "resource", "endpoint", "rest",
+                                        "handler", "boundary", "api")):
+            return "boundary"
+
+        # 3. CONTROL — services, managers, use-cases
+        if any(k in combined for k in ("service", "manager", "interactor", "usecase",
+                                        "business", "facade")):
+            return "control"
+
+        # 4. ENTITY — domain models / DTOs / value objects (BCE pattern)
+        if tid in model_types or any(k in combined for k in ("entity", "model",
+                                                               "domain", "dto",
+                                                               "vo", "bean", "pojo")):
+            return "entity"
+
         return "participant"
 
     entry_controllers: List[str] = []
@@ -983,29 +993,11 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ACTIVITY DIAGRAM
-#
-#  Shows: method-level control flow derived from CALLS edges (primary source),
-#         with a heuristic fallback when no CALLS data is present.
-#
-#  PlantUML constructs used:
-#    - |Swimlane|                                   (one lane per architectural type)
-#    - start / stop
-#    - :action;                                     (action node)
-#    - if (...) then (yes) / else (no) / endif      (boolean-return guard)
-#    - repeat / repeat while (...)                  (collection-return loop)
-#    - note right / note left                       (parameter hints on decisions)
-#
-#  Message source priority:
-#    1. PRIMARY  — CALLS edges: actual runtime method invocations in call order.
-#    2. FALLBACK — method listing heuristic when no CALLS data exists in CIR.
-#
-#  Does NOT show: fields, inheritance, package structure, interface lollipops.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def generate_activity_diagram(cir: Dict[str, Any]) -> str:
     nodes_by_id, edges = _index_cir(cir)
 
-    # ── 1. Index TypeDecl nodes ─────────────────────────────────────────────
     type_attrs: Dict[str, Dict[str, Any]] = {}
     for nid, n in nodes_by_id.items():
         if n.get("kind") == "TypeDecl":
@@ -1014,7 +1006,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
     if not type_attrs:
         return "@startuml\nstart\n:No types found in CIR.;\nstop\n@enduml"
 
-    # ── 2. Methods per type + method ownership ──────────────────────────────
     methods_by_type: Dict[str, List[Dict[str, Any]]] = {t: [] for t in type_attrs}
     method_owner: Dict[str, str] = {}
     method_attrs_by_id: Dict[str, Dict[str, Any]] = {}
@@ -1029,7 +1020,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
                 method_owner[dst] = src
                 method_attrs_by_id[dst] = ma
 
-    # ── 3. Parameters per method ────────────────────────────────────────────
     params_by_method: Dict[str, List[Dict[str, Any]]] = {}
     for e in edges:
         if e.get("type") == "PARAM_OF":
@@ -1039,7 +1029,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
                 if pn and pn.get("kind") == "Parameter":
                     params_by_method.setdefault(mid, []).append(pn.get("attrs", {}))
 
-    # ── 4. CALLS edges ──────────────────────────────────────────────────────
     calls_by_src: Dict[str, List[Dict[str, Any]]] = {}
     for e in edges:
         if e.get("type") != "CALLS":
@@ -1055,18 +1044,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
 
     for src_m in calls_by_src:
         calls_by_src[src_m].sort(key=lambda x: x.get("order", 0))
-
-    # ── 5. Exclusion: pure model/POJO types AND infrastructure noise ─────────
-    #
-    # FIX (BUG 1): The original code only excluded _is_pure_model() types.
-    # This let DatabaseConfig (layer=70) and LoggerUtil (layer=60) through.
-    # They get called from a main/config class very early, so their 5 methods
-    # end up being the ONLY thing rendered.
-    #
-    # Now we ALSO exclude _is_infrastructure_noise() types — the same filter
-    # used by the sequence and component diagram generators.  This removes
-    # DatabaseConfig, LoggerUtil, any *Config, *Util, *Helper, *Exception etc.
-    # from the activity diagram so only real business-logic types remain.
 
     _MODEL_PKG_KW     = {"model", "entity", "domain", "dto", "vo", "bean", "pojo"}
     _BEHAVIOUR_PKG_KW = {"util", "utils", "helper", "helpers", "service", "services",
@@ -1095,7 +1072,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
                        and m.get("name", "").lower() not in _TRIVIAL_NAMES]
         return len(non_trivial) == 0
 
-    # ── BUG 1 FIX: also exclude infrastructure noise types ──────────────────
     excluded: Set[str] = {
         t for t in type_attrs
         if _is_pure_model(t) or _is_infrastructure_noise(
@@ -1106,8 +1082,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
 
     active_types = {t: a for t, a in type_attrs.items() if t not in excluded}
     if not active_types:
-        # If everything got excluded (e.g. tiny utility-only project), fall back
-        # to showing ALL non-model types so the diagram is never empty.
         active_types = {t: a for t, a in type_attrs.items() if not _is_pure_model(t)}
     if not active_types:
         active_types = dict(type_attrs)
@@ -1119,8 +1093,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
             active_types[t].get("package", ""),
         ),
     )
-
-    # ── 6. Format helpers ────────────────────────────────────────────────────
 
     def _safe_label(text: str) -> str:
         return text.replace("<", "(").replace(">", ")").replace("|", "/")
@@ -1211,8 +1183,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
         subject = re.sub(r"([A-Z])", lambda m: " " + m.group(1), subject).strip().lower()
         return f"{subject}{suffix}"
 
-    # ── 7. Build ordered call list ──────────────────────────────────────────
-
     src_layer: Dict[str, Tuple[int, int]] = {}
     for src_m, call_list in calls_by_src.items():
         src_type = method_owner.get(src_m)
@@ -1241,8 +1211,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
             if not dst_m:
                 continue
             dst_type = method_owner.get(dst_m)
-            # ── BUG 1 FIX (continued): also filter dst methods whose owner is
-            #    excluded (DatabaseConfig, LoggerUtil, etc.)
             if not dst_type or dst_type not in active_types:
                 continue
             dst_attrs = method_attrs_by_id.get(dst_m) or {}
@@ -1256,7 +1224,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
 
     use_primary = bool(all_calls)
 
-    # ── 8. Skinparam header ─────────────────────────────────────────────────
     out: List[str] = [
         "@startuml",
         "",
@@ -1275,59 +1242,29 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
     ]
 
     if use_primary:
-        # ── PRIMARY PATH ────────────────────────────────────────────────────
-        #
-        # FIX (BUG 2): The original dedup set was keyed on dst_m alone.
-        # LoggerUtil.info / DatabaseConfig.getConnection appear as dst_m in the
-        # very first caller's call list, so they land in `emitted` immediately.
-        # Every later caller (AccountService, TransactionService, etc.) that
-        # also calls those methods produces zero output — the business logic
-        # becomes invisible.
-        #
-        # New dedup strategy:
-        #   • Primary dedup key: (src_type_id, dst_m)
-        #     → Each CALLER TYPE can emit each destination method at most once.
-        #     → AccountService.createAccount → AccountDAO.save  AND
-        #       TransactionService.transfer → AccountDAO.save  both appear
-        #       (two different callers, same dst = two entries, both visible).
-        #   • Secondary global dedup: globally_seen set on dst_m, capped at
-        #     MAX_GLOBAL_REPEATS (3).  This prevents a single utility method
-        #     that is called from 10 different services from appearing 10 times,
-        #     while still allowing it to appear a few times when context differs.
-        #
-        # FIX (BUG 3): Cap actions per caller type at MAX_PER_CALLER (8).
-        # A service with 15 methods × 4 calls each = 60 nodes is unusable.
+        MAX_PER_CALLER   = 8
+        MAX_GLOBAL_REPS  = 3
 
-        MAX_PER_CALLER   = 8   # max action nodes contributed by one caller type
-        MAX_GLOBAL_REPS  = 3   # a single dst method can appear at most this many times globally
-
-        # per-caller-type dedup: (src_type_id, dst_m)
         per_caller_emitted: Set[Tuple[str, str]] = set()
-        # per-caller-type action counter
         per_caller_count: Dict[str, int] = {}
-        # global repeat counter: dst_m → how many times already emitted
         global_count: Dict[str, int] = {}
 
         for _, src_m, dst_m in all_calls:
             src_type = method_owner.get(src_m, "")
 
-            # ── per-caller dedup ────────────────────────────────────────────
             key = (src_type, dst_m)
             if key in per_caller_emitted:
                 continue
             per_caller_emitted.add(key)
 
-            # ── per-caller cap ──────────────────────────────────────────────
             if per_caller_count.get(src_type, 0) >= MAX_PER_CALLER:
                 continue
             per_caller_count[src_type] = per_caller_count.get(src_type, 0) + 1
 
-            # ── global repeat cap ───────────────────────────────────────────
             if global_count.get(dst_m, 0) >= MAX_GLOBAL_REPS:
                 continue
             global_count[dst_m] = global_count.get(dst_m, 0) + 1
 
-            # ── resolve names ───────────────────────────────────────────────
             dst_type  = method_owner.get(dst_m, "")
             dst_name  = (type_attrs.get(dst_type) or {}).get("name", dst_type)
             dst_mname = (nodes_by_id.get(dst_m) or {}).get("attrs", {}).get("name", "")
@@ -1337,7 +1274,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
 
             action = _fmt_action(dst_m, dst_mname, dst_name)
 
-            # ── emit node ───────────────────────────────────────────────────
             if _is_loop(dst_m):
                 out.append("repeat")
                 out.append(f"  :{action};")
@@ -1355,9 +1291,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
                 out.append(f":{action};")
 
     else:
-        # ── FALLBACK PATH ────────────────────────────────────────────────────
-        # Safe to use swimlanes here — each type's methods stay in their own
-        # lane so structured blocks never cross lane boundaries.
         out.append(":Approximate flow — no call chain data available;")
         out.append("")
 
