@@ -1003,31 +1003,6 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def generate_activity_diagram(cir: Dict[str, Any]) -> str:
-    """
-    Generate a PlantUML activity diagram from a CIR graph.
-
-    Design decisions for PlantUML compatibility:
-    ─────────────────────────────────────────────
-    PRIMARY path (CALLS edges present):
-      • Uses NO swimlanes. Swimlane switches inside if/repeat blocks crash the
-        PlantUML swimlane renderer, and cross-type call chains almost always
-        cross lane boundaries inside structured blocks.
-      • Instead, action labels are prefixed with the owning type name so the
-        reader can still see which component handles each step.
-      • boolean-return → if/endif decision diamond
-      • collection-return → repeat/repeat while (one-line form, always safe)
-      • Deduplicates (src_method, dst_method) pairs.
-
-    FALLBACK path (no CALLS data):
-      • Uses swimlanes — one per active type. Each type's methods are listed
-        sequentially inside its own lane, so lane boundaries never appear
-        inside a structured block.
-      • Same boolean / collection heuristics applied.
-
-    Exclusions (both paths):
-      • Pure model/POJO types (Student, User) — no behaviour.
-      • Util/service/dao types are KEPT (DatabaseUtil, BCryptUtil are actors).
-    """
     nodes_by_id, edges = _index_cir(cir)
 
     # ── 1. Index TypeDecl nodes ─────────────────────────────────────────────
@@ -1081,7 +1056,18 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
     for src_m in calls_by_src:
         calls_by_src[src_m].sort(key=lambda x: x.get("order", 0))
 
-    # ── 5. Exclusion: pure model/POJO types only ────────────────────────────
+    # ── 5. Exclusion: pure model/POJO types AND infrastructure noise ─────────
+    #
+    # FIX (BUG 1): The original code only excluded _is_pure_model() types.
+    # This let DatabaseConfig (layer=70) and LoggerUtil (layer=60) through.
+    # They get called from a main/config class very early, so their 5 methods
+    # end up being the ONLY thing rendered.
+    #
+    # Now we ALSO exclude _is_infrastructure_noise() types — the same filter
+    # used by the sequence and component diagram generators.  This removes
+    # DatabaseConfig, LoggerUtil, any *Config, *Util, *Helper, *Exception etc.
+    # from the activity diagram so only real business-logic types remain.
+
     _MODEL_PKG_KW     = {"model", "entity", "domain", "dto", "vo", "bean", "pojo"}
     _BEHAVIOUR_PKG_KW = {"util", "utils", "helper", "helpers", "service", "services",
                          "manager", "managers", "dao", "repository", "config"}
@@ -1109,8 +1095,20 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
                        and m.get("name", "").lower() not in _TRIVIAL_NAMES]
         return len(non_trivial) == 0
 
-    excluded: Set[str] = {t for t in type_attrs if _is_pure_model(t)}
+    # ── BUG 1 FIX: also exclude infrastructure noise types ──────────────────
+    excluded: Set[str] = {
+        t for t in type_attrs
+        if _is_pure_model(t) or _is_infrastructure_noise(
+            type_attrs[t].get("name", ""),
+            type_attrs[t].get("package", ""),
+        )
+    }
+
     active_types = {t: a for t, a in type_attrs.items() if t not in excluded}
+    if not active_types:
+        # If everything got excluded (e.g. tiny utility-only project), fall back
+        # to showing ALL non-model types so the diagram is never empty.
+        active_types = {t: a for t, a in type_attrs.items() if not _is_pure_model(t)}
     if not active_types:
         active_types = dict(type_attrs)
 
@@ -1125,7 +1123,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
     # ── 6. Format helpers ────────────────────────────────────────────────────
 
     def _safe_label(text: str) -> str:
-        """Escape chars that break PlantUML labels: <, >, |"""
         return text.replace("<", "(").replace(">", ")").replace("|", "/")
 
     def _fmt_action(method_id: str, method_name: str, owner_name: str) -> str:
@@ -1142,37 +1139,85 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
         raw = f"{owner_name}.{method_name}({', '.join(parts)}{suffix})"
         return _safe_label(raw)
 
-    def _is_list_ret(mid: str) -> bool:
+    def _is_loop(mid: str) -> bool:
         ma = method_attrs_by_id.get(mid) or {}
         rt = (ma.get("raw_return_type") or ma.get("return_type") or "").lower()
         return any(k in rt for k in ("list", "collection", "set", "iterable", "[]", "array"))
 
-    def _is_bool_ret(mid: str) -> bool:
-        ma = method_attrs_by_id.get(mid) or {}
-        rt = _clean_type_short(ma.get("raw_return_type") or ma.get("return_type") or "")
-        return rt.lower() in ("boolean", "bool")
+    def _is_guard(mid: str) -> bool:
+        ma    = method_attrs_by_id.get(mid) or {}
+        name  = (ma.get("name") or "").lower()
+        rt    = _clean_type_short(
+                    ma.get("raw_return_type") or ma.get("return_type") or ""
+                ).lower()
+        if rt in ("boolean", "bool"):
+            return True
+        if "optional" in rt:
+            return True
+        _GUARD_PFXS = ("validate", "check", "verify", "ensure", "assert",
+                       "exists", "existsby", "is", "has", "can", "allow")
+        if any(name.startswith(p) for p in _GUARD_PFXS):
+            return True
+        return False
 
-    # ── 7. Gather active call triples, grouped by caller layer ─────────────
-    #
-    # Problem with a flat sort-by-order: every caller method resets `order`
-    # from 0, so calls from AccountService.createAccount (order 0,1,2…) and
-    # AccountService.deposit (order 0,1,2…) interleave arbitrarily when merged
-    # into one list and sorted by order value alone.
-    #
-    # Fix: group callers by their owning type's architectural layer, then sort
-    # each group's calls by their local order.  This gives a coherent top-down
-    # flow: Controller methods first, Service methods next, Repository last.
-    #
-    # Within a type, caller methods are sorted by the first order value of any
-    # call they make (i.e. the method that fires earliest in the file).
+    def _guard_label(dst_mname: str, mid: str) -> str:
+        ma   = method_attrs_by_id.get(mid) or {}
+        name = dst_mname
+        rt   = _clean_type_short(
+                   ma.get("raw_return_type") or ma.get("return_type") or ""
+               ).lower()
+        if "optional" in rt:
+            subject = re.sub(
+                r"^(?:findBy|getBy|loadBy|fetchBy|searchBy|"
+                r"find|get|load|fetch|lookup|query|retrieve)",
+                "", name
+            ).strip()
+            if subject:
+                subject = re.sub(r"([A-Z])", lambda m: " " + m.group(1), subject).strip().lower()
+            else:
+                subject = "result"
+            return f"{subject} found?"
+        nl = name.lower()
+        if nl.startswith("existsby"):
+            subject, suffix = name[len("existsBy"):], " exists?"
+        elif nl.startswith("exists"):
+            subject, suffix = name[len("exists"):], " exists?"
+        elif nl.startswith("validateby"):
+            subject, suffix = name[len("validateBy"):], " valid?"
+        elif nl.startswith("validate"):
+            subject, suffix = name[len("validate"):], " valid?"
+        elif nl.startswith("verifyby"):
+            subject, suffix = name[len("verifyBy"):], " valid?"
+        elif nl.startswith("verify"):
+            subject, suffix = name[len("verify"):], " valid?"
+        elif nl.startswith("checkby"):
+            subject, suffix = name[len("checkBy"):], " correct?"
+        elif nl.startswith("check"):
+            subject, suffix = name[len("check"):], " correct?"
+        elif nl.startswith("ensure"):
+            subject, suffix = name[len("ensure"):], " satisfied?"
+        elif nl.startswith("has"):
+            subject, suffix = name[len("has"):], "?"
+        elif nl.startswith("is"):
+            subject, suffix = name[len("is"):], "?"
+        elif nl.startswith("can"):
+            subject, suffix = name[len("can"):], "?"
+        elif nl.startswith("allow"):
+            subject, suffix = name[len("allow"):], " allowed?"
+        else:
+            subject, suffix = name, "?"
+        if not subject:
+            subject = name
+        subject = re.sub(r"([A-Z])", lambda m: " " + m.group(1), subject).strip().lower()
+        return f"{subject}{suffix}"
 
-    # Map src_method → (layer, earliest_order) for sorting
+    # ── 7. Build ordered call list ──────────────────────────────────────────
+
     src_layer: Dict[str, Tuple[int, int]] = {}
     for src_m, call_list in calls_by_src.items():
         src_type = method_owner.get(src_m)
         if not src_type or src_type not in active_types:
             continue
-        # Skip private callers — Python _ prefix or CIR visibility=private
         src_attrs = method_attrs_by_id.get(src_m) or {}
         src_nm    = src_attrs.get("name", "")
         src_vis   = src_attrs.get("visibility", "public")
@@ -1180,17 +1225,15 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
             continue
         if src_nm.startswith("_") and not src_nm.startswith("__"):
             continue
-        layer = _layer_order(
+        layer     = _layer_order(
             active_types[src_type].get("name", ""),
             active_types[src_type].get("package", ""),
         )
-        earliest = min((c.get("order", 0) for c in call_list), default=0)
+        earliest  = min((c.get("order", 0) for c in call_list), default=0)
         src_layer[src_m] = (layer, earliest)
 
-    # Sort callers: by layer first, then earliest call order
     sorted_callers = sorted(src_layer.keys(), key=lambda m: src_layer[m])
 
-    # Build ordered flat list: for each caller, append its dst calls in order
     all_calls: List[Tuple[int, str, str]] = []
     for src_m in sorted_callers:
         for call in sorted(calls_by_src[src_m], key=lambda c: c.get("order", 0)):
@@ -1198,170 +1241,93 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
             if not dst_m:
                 continue
             dst_type = method_owner.get(dst_m)
+            # ── BUG 1 FIX (continued): also filter dst methods whose owner is
+            #    excluded (DatabaseConfig, LoggerUtil, etc.)
             if not dst_type or dst_type not in active_types:
                 continue
-            # Skip private destination methods — either by CIR visibility field
-            # or by Python convention (_name prefix means private/internal).
             dst_attrs = method_attrs_by_id.get(dst_m) or {}
             dst_vis   = dst_attrs.get("visibility", "public")
             dst_nm    = dst_attrs.get("name", "")
             if dst_vis == "private":
                 continue
-            # Python: single underscore prefix = private/protected
             if dst_nm.startswith("_") and not dst_nm.startswith("__"):
                 continue
             all_calls.append((src_layer[src_m][0], src_m, dst_m))
 
     use_primary = bool(all_calls)
 
-    # ── 8. Skinparam header (no swimlane params if using primary/no-lane mode)
+    # ── 8. Skinparam header ─────────────────────────────────────────────────
     out: List[str] = [
         "@startuml",
         "",
         "skinparam shadowing               false",
+        "skinparam activityBorderColor     #000000",
+        "skinparam activityBackgroundColor #ffffff",
+        "skinparam activityFontColor       #000000",
+        "skinparam activityFontSize        13",
+        "skinparam arrowColor              #000000",
+        "skinparam ActivityDiamondBorderColor     #000000",
+        "skinparam ActivityDiamondBackgroundColor #ffffff",
+        "skinparam ActivityDiamondFontColor       #000000",
         "",
         "start",
         "",
     ]
 
     if use_primary:
-        # ── PRIMARY PATH ─────────────────────────────────────────────────────
-        # Emits action nodes with heuristic branching inferred from:
-        #   • method name prefixes  (validate/check/exists/verify → guard)
-        #   • return type           (Optional/boolean → guard, List → loop)
-        #   • call position         (first call in a chain is often a lookup/guard)
+        # ── PRIMARY PATH ────────────────────────────────────────────────────
         #
-        # Branching rules (applied per dst method):
-        #   GUARD   — name starts with validate/check/exists/verify/is/has/can/ensure
-        #             OR returns boolean/Optional/bool
-        #             → if (condition) then (yes) … else (no) :handle error; endif
-        #   LOOP    — returns List/Collection/Set/Iterable/array
-        #             → repeat … repeat while (more items?) is (yes) -> no;
-        #   ACTION  — everything else → plain :action; node
+        # FIX (BUG 2): The original dedup set was keyed on dst_m alone.
+        # LoggerUtil.info / DatabaseConfig.getConnection appear as dst_m in the
+        # very first caller's call list, so they land in `emitted` immediately.
+        # Every later caller (AccountService, TransactionService, etc.) that
+        # also calls those methods produces zero output — the business logic
+        # becomes invisible.
         #
-        # Dedup on dst_m: each called method appears at most once.
+        # New dedup strategy:
+        #   • Primary dedup key: (src_type_id, dst_m)
+        #     → Each CALLER TYPE can emit each destination method at most once.
+        #     → AccountService.createAccount → AccountDAO.save  AND
+        #       TransactionService.transfer → AccountDAO.save  both appear
+        #       (two different callers, same dst = two entries, both visible).
+        #   • Secondary global dedup: globally_seen set on dst_m, capped at
+        #     MAX_GLOBAL_REPEATS (3).  This prevents a single utility method
+        #     that is called from 10 different services from appearing 10 times,
+        #     while still allowing it to appear a few times when context differs.
+        #
+        # FIX (BUG 3): Cap actions per caller type at MAX_PER_CALLER (8).
+        # A service with 15 methods × 4 calls each = 60 nodes is unusable.
 
-        # ── helper classifiers ──────────────────────────────────────────────
-        _GUARD_PFXS = ("validate", "check", "verify", "ensure", "assert",
-                       "exists", "existsby", "is", "has", "can", "allow")
-        _FIND_PFXS  = ("find", "get", "load", "fetch", "lookup", "query",
-                       "retrieve", "read", "search")
+        MAX_PER_CALLER   = 8   # max action nodes contributed by one caller type
+        MAX_GLOBAL_REPS  = 3   # a single dst method can appear at most this many times globally
 
-        def _is_guard(mid: str) -> bool:
-            """
-            Returns True when the method acts as a decision gate:
-              - name prefix signals validation / existence check
-              - OR returns boolean / Boolean
-              - OR returns Optional (findBy… that may come back empty)
-            """
-            ma    = method_attrs_by_id.get(mid) or {}
-            name  = (ma.get("name") or "").lower()
-            rt    = _clean_type_short(
-                        ma.get("raw_return_type") or ma.get("return_type") or ""
-                    ).lower()
-            # boolean return always a guard
-            if rt in ("boolean", "bool"):
-                return True
-            # Optional return → potential null path
-            if "optional" in rt:
-                return True
-            # Explicit guard prefix
-            if any(name.startswith(p) for p in _GUARD_PFXS):
-                return True
-            return False
-
-        def _is_loop(mid: str) -> bool:
-            ma = method_attrs_by_id.get(mid) or {}
-            rt = (ma.get("raw_return_type") or ma.get("return_type") or "").lower()
-            return any(k in rt for k in
-                       ("list", "collection", "set", "iterable", "[]", "array"))
-
-        def _guard_label(dst_mname: str, mid: str) -> str:
-            """Human-readable condition label for the diamond."""
-            ma   = method_attrs_by_id.get(mid) or {}
-            name = dst_mname  # preserve original casing for regex
-            rt   = _clean_type_short(
-                       ma.get("raw_return_type") or ma.get("return_type") or ""
-                   ).lower()
-
-            if "optional" in rt:
-                # findByUsername → "username found?"
-                # findByAccountNumber → "accountNumber found?"
-                subject = re.sub(
-                    r"^(?:findBy|getBy|loadBy|fetchBy|searchBy|"
-                    r"find|get|load|fetch|lookup|query|retrieve)",
-                    "", name
-                ).strip()
-                if subject:
-                    # split camelCase: AccountNumber → Account Number
-                    subject = re.sub(r"([A-Z])", lambda m: " " + m.group(1), subject).strip().lower()
-                else:
-                    subject = "result"
-                return f"{subject} found?"
-
-            # boolean methods: existsByUsername → "username exists?"
-            #                  validateInput   → "input valid?"
-            #                  checkPassword   → "password correct?"
-            #                  isActive        → "active?"
-            nl = name.lower()
-            # Determine suffix first, then strip prefix keeping remainder
-            if nl.startswith("existsby"):
-                subject = name[len("existsBy"):]
-                suffix  = " exists?"
-            elif nl.startswith("exists"):
-                subject = name[len("exists"):]
-                suffix  = " exists?"
-            elif nl.startswith("validateby"):
-                subject = name[len("validateBy"):]
-                suffix  = " valid?"
-            elif nl.startswith("validate"):
-                subject = name[len("validate"):]
-                suffix  = " valid?"
-            elif nl.startswith("verifyby"):
-                subject = name[len("verifyBy"):]
-                suffix  = " valid?"
-            elif nl.startswith("verify"):
-                subject = name[len("verify"):]
-                suffix  = " valid?"
-            elif nl.startswith("checkby"):
-                subject = name[len("checkBy"):]
-                suffix  = " correct?"
-            elif nl.startswith("check"):
-                subject = name[len("check"):]
-                suffix  = " correct?"
-            elif nl.startswith("ensure"):
-                subject = name[len("ensure"):]
-                suffix  = " satisfied?"
-            elif nl.startswith("has"):
-                subject = name[len("has"):]
-                suffix  = "?"
-            elif nl.startswith("is"):
-                subject = name[len("is"):]
-                suffix  = "?"
-            elif nl.startswith("can"):
-                subject = name[len("can"):]
-                suffix  = "?"
-            elif nl.startswith("allow"):
-                subject = name[len("allow"):]
-                suffix  = " allowed?"
-            else:
-                subject = name
-                suffix  = "?"
-
-            if not subject:
-                subject = name
-            # camelCase → space-separated lowercase words
-            subject = re.sub(r"([A-Z])", lambda m: " " + m.group(1), subject).strip().lower()
-            return f"{subject}{suffix}"
-
-        # ── emit loop ───────────────────────────────────────────────────────
-        emitted: Set[str] = set()
+        # per-caller-type dedup: (src_type_id, dst_m)
+        per_caller_emitted: Set[Tuple[str, str]] = set()
+        # per-caller-type action counter
+        per_caller_count: Dict[str, int] = {}
+        # global repeat counter: dst_m → how many times already emitted
+        global_count: Dict[str, int] = {}
 
         for _, src_m, dst_m in all_calls:
-            if dst_m in emitted:
-                continue
-            emitted.add(dst_m)
+            src_type = method_owner.get(src_m, "")
 
+            # ── per-caller dedup ────────────────────────────────────────────
+            key = (src_type, dst_m)
+            if key in per_caller_emitted:
+                continue
+            per_caller_emitted.add(key)
+
+            # ── per-caller cap ──────────────────────────────────────────────
+            if per_caller_count.get(src_type, 0) >= MAX_PER_CALLER:
+                continue
+            per_caller_count[src_type] = per_caller_count.get(src_type, 0) + 1
+
+            # ── global repeat cap ───────────────────────────────────────────
+            if global_count.get(dst_m, 0) >= MAX_GLOBAL_REPS:
+                continue
+            global_count[dst_m] = global_count.get(dst_m, 0) + 1
+
+            # ── resolve names ───────────────────────────────────────────────
             dst_type  = method_owner.get(dst_m, "")
             dst_name  = (type_attrs.get(dst_type) or {}).get("name", dst_type)
             dst_mname = (nodes_by_id.get(dst_m) or {}).get("attrs", {}).get("name", "")
@@ -1371,14 +1337,13 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
 
             action = _fmt_action(dst_m, dst_mname, dst_name)
 
+            # ── emit node ───────────────────────────────────────────────────
             if _is_loop(dst_m):
-                # Collection return → process-each loop
                 out.append("repeat")
                 out.append(f"  :{action};")
                 out.append("repeat while (more items?) is (yes) -> no;")
 
             elif _is_guard(dst_m):
-                # Guard / validation → decision diamond
                 cond = _safe_label(_guard_label(dst_mname, dst_m))
                 out.append(f"if ({cond}) then (yes)")
                 out.append(f"  :{action};")
@@ -1391,18 +1356,15 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
 
     else:
         # ── FALLBACK PATH ────────────────────────────────────────────────────
-        # Swimlanes are safe here because each type's methods stay inside
-        # their own lane — no structured blocks cross lane boundaries.
-        pass  # no extra skinparams needed for fallback swimlane path
-
-        out.append(":Approximate flow - no call chain data available;")
+        # Safe to use swimlanes here — each type's methods stay in their own
+        # lane so structured blocks never cross lane boundaries.
+        out.append(":Approximate flow — no call chain data available;")
         out.append("")
 
         any_emitted = False
         for type_id in sorted_type_ids:
-            type_name = active_types[type_id].get("name", type_id)
-            lane_name = re.sub(r"[^\w ]", "", type_name).strip() or "System"
-
+            type_name    = active_types[type_id].get("name", type_id)
+            lane_name    = re.sub(r"[^\w ]", "", type_name).strip() or "System"
             type_methods = [
                 m for m in methods_by_type.get(type_id, [])
                 if not m.get("is_constructor")
@@ -1421,7 +1383,6 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
                 mname  = m.get("name", "method")
                 mid    = m.get("_id", "")
                 action = _fmt_action(mid, mname, type_name)
-
                 out.append(f":{action};")
 
         if not any_emitted:
