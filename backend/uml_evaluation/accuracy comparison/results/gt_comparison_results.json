@@ -1,118 +1,365 @@
 [
   {
-    "file": "13_library_borrow_system.py",
-    "language": "python",
+    "file": "21_online_exam_system.js",
+    "language": "javascript",
     "errors": {},
     "diagrams": {
       "class": {
         "regex": {
-          "overall": {
-            "tp": 0,
+          "classes": {
+            "tp": 7,
             "fp": 0,
             "fn": 0,
             "precision": 100.0,
             "recall": 100.0,
             "f1": 100.0
+          },
+          "fields": {
+            "tp": 17,
+            "fp": 0,
+            "fn": 0,
+            "precision": 100.0,
+            "recall": 100.0,
+            "f1": 100.0
+          },
+          "methods": {
+            "tp": 55,
+            "fp": 22,
+            "fn": 0,
+            "precision": 71.4,
+            "recall": 100.0,
+            "f1": 83.3
+          },
+          "implements": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 1,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "associates": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 3,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "depends_on": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 8,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "overall": {
+            "tp": 79,
+            "fp": 22,
+            "fn": 12,
+            "precision": 78.2,
+            "recall": 86.8,
+            "f1": 82.3
           }
         },
         "ai": {
-          "overall": {
-            "tp": 0,
+          "classes": {
+            "tp": 7,
             "fp": 0,
             "fn": 0,
             "precision": 100.0,
             "recall": 100.0,
             "f1": 100.0
+          },
+          "fields": {
+            "tp": 17,
+            "fp": 0,
+            "fn": 0,
+            "precision": 100.0,
+            "recall": 100.0,
+            "f1": 100.0
+          },
+          "methods": {
+            "tp": 55,
+            "fp": 21,
+            "fn": 0,
+            "precision": 72.4,
+            "recall": 100.0,
+            "f1": 84.0
+          },
+          "implements": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 1,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "associates": {
+            "tp": 2,
+            "fp": 2,
+            "fn": 1,
+            "precision": 50.0,
+            "recall": 66.7,
+            "f1": 57.2
+          },
+          "depends_on": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 8,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "overall": {
+            "tp": 81,
+            "fp": 23,
+            "fn": 10,
+            "precision": 77.9,
+            "recall": 89.0,
+            "f1": 83.1
           }
         },
         "errors": []
       },
       "package": {
         "regex": {
-          "overall": {
-            "tp": 0,
+          "members": {
+            "tp": 7,
             "fp": 0,
             "fn": 0,
             "precision": 100.0,
             "recall": 100.0,
             "f1": 100.0
+          },
+          "dependencies": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 4,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "overall": {
+            "tp": 7,
+            "fp": 0,
+            "fn": 4,
+            "precision": 100.0,
+            "recall": 63.6,
+            "f1": 77.8
           }
         },
         "ai": {
-          "overall": {
-            "tp": 0,
+          "members": {
+            "tp": 7,
             "fp": 0,
             "fn": 0,
             "precision": 100.0,
             "recall": 100.0,
             "f1": 100.0
+          },
+          "dependencies": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 4,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "overall": {
+            "tp": 7,
+            "fp": 0,
+            "fn": 4,
+            "precision": 100.0,
+            "recall": 63.6,
+            "f1": 77.8
           }
         },
         "errors": []
       },
       "sequence": {
         "regex": {
-          "overall": {
-            "tp": 0,
-            "fp": 0,
+          "participants": {
+            "tp": 3,
+            "fp": 4,
             "fn": 0,
-            "precision": 100.0,
+            "precision": 42.9,
             "recall": 100.0,
-            "f1": 100.0
+            "f1": 60.0
+          },
+          "messages": {
+            "tp": 0,
+            "fp": 2,
+            "fn": 6,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "overall": {
+            "tp": 3,
+            "fp": 6,
+            "fn": 6,
+            "precision": 33.3,
+            "recall": 33.3,
+            "f1": 33.3
           }
         },
         "ai": {
-          "overall": {
-            "tp": 0,
-            "fp": 0,
+          "participants": {
+            "tp": 3,
+            "fp": 2,
             "fn": 0,
-            "precision": 100.0,
+            "precision": 60.0,
             "recall": 100.0,
-            "f1": 100.0
+            "f1": 75.0
+          },
+          "messages": {
+            "tp": 3,
+            "fp": 14,
+            "fn": 3,
+            "precision": 17.6,
+            "recall": 50.0,
+            "f1": 26.0
+          },
+          "overall": {
+            "tp": 6,
+            "fp": 16,
+            "fn": 3,
+            "precision": 27.3,
+            "recall": 66.7,
+            "f1": 38.7
           }
         },
         "errors": []
       },
       "component": {
         "regex": {
-          "overall": {
-            "tp": 0,
+          "components": {
+            "tp": 7,
             "fp": 0,
             "fn": 0,
             "precision": 100.0,
             "recall": 100.0,
             "f1": 100.0
+          },
+          "interfaces": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 3,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "connections": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 3,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "overall": {
+            "tp": 7,
+            "fp": 0,
+            "fn": 6,
+            "precision": 100.0,
+            "recall": 53.8,
+            "f1": 70.0
           }
         },
         "ai": {
-          "overall": {
-            "tp": 0,
+          "components": {
+            "tp": 7,
             "fp": 0,
             "fn": 0,
             "precision": 100.0,
             "recall": 100.0,
             "f1": 100.0
+          },
+          "interfaces": {
+            "tp": 3,
+            "fp": 2,
+            "fn": 0,
+            "precision": 60.0,
+            "recall": 100.0,
+            "f1": 75.0
+          },
+          "connections": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 3,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "overall": {
+            "tp": 10,
+            "fp": 2,
+            "fn": 3,
+            "precision": 83.3,
+            "recall": 76.9,
+            "f1": 80.0
           }
         },
         "errors": []
       },
       "activity": {
         "regex": {
-          "overall": {
+          "actions": {
+            "tp": 8,
+            "fp": 10,
+            "fn": 3,
+            "precision": 44.4,
+            "recall": 72.7,
+            "f1": 55.1
+          },
+          "decisions": {
             "tp": 0,
             "fp": 0,
-            "fn": 0,
+            "fn": 1,
             "precision": 100.0,
-            "recall": 100.0,
-            "f1": 100.0
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "overall": {
+            "tp": 8,
+            "fp": 10,
+            "fn": 4,
+            "precision": 44.4,
+            "recall": 66.7,
+            "f1": 53.3
           }
         },
-        "ai": {},
-        "errors": [
-          "ai: SVG render failed: HTTPError: 500 Server Error: Internal Server Error for url: http://127.0.0.1:7090/render/svg"
-        ]
+        "ai": {
+          "actions": {
+            "tp": 8,
+            "fp": 10,
+            "fn": 3,
+            "precision": 44.4,
+            "recall": 72.7,
+            "f1": 55.1
+          },
+          "decisions": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 1,
+            "precision": 100.0,
+            "recall": 0.0,
+            "f1": 0.0
+          },
+          "overall": {
+            "tp": 8,
+            "fp": 10,
+            "fn": 4,
+            "precision": 44.4,
+            "recall": 66.7,
+            "f1": 53.3
+          }
+        },
+        "errors": []
       }
     },
-    "elapsed_s": 55.2
+    "elapsed_s": 71.9
   }
 ]
