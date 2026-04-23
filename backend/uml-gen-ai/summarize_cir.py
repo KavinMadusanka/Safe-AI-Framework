@@ -257,6 +257,13 @@ def _is_class_diagram_noise(name: str) -> bool:
     return nm in {"bcrypt"}
 
 
+def _has_main_like_method(methods: List[Dict[str, Any]]) -> bool:
+    for m in methods or []:
+        if _s((m or {}).get("name")).lower() == "main":
+            return True
+    return False
+
+
 def _infer_arch_package(type_name: str, kind: str = "") -> str:
     nm = (type_name or "").lower().strip()
     kd = (kind or "").lower().strip()
@@ -380,17 +387,20 @@ def _summarize_package(
         tname = type_names[type_id]
         attrs = tnode.get("attrs") or tnode
         kind = (attrs.get("kind") or "class").lower()
+        has_main_like = _has_main_like_method(methods_by_type.get(type_id, []))
 
-        if _is_entry_or_demo_type(tname) or _is_class_diagram_noise(tname):
+        if _is_class_diagram_noise(tname):
             continue
 
         raw_pkg = _get(tnode, "package", default="(default)")
+        inferred_pkg = "application" if has_main_like else _infer_arch_package(tname, kind)
+
         if single_explicit_root and _is_synthetic_root(single_explicit_root):
-            pkg = _infer_arch_package(tname, kind)
+            pkg = inferred_pkg
         elif has_explicit_package and raw_pkg not in ("", "(default)"):
             pkg = raw_pkg
         else:
-            pkg = _infer_arch_package(tname, kind)
+            pkg = inferred_pkg
 
         if pkg == "misc" and has_explicit_package and not single_explicit_root:
             pkg = raw_pkg if raw_pkg not in ("", "(default)") else "misc"
@@ -494,6 +504,20 @@ def _summarize_package(
                 if dst_type_id and dst_type_id != src_type_id:
                     _add_dependency(src_type_id, dst_type_id)
 
+    # JS adapters may not emit explicit type dependencies. When empty, synthesize
+    # package-level dependencies from architectural ordering of discovered packages.
+    if not package_dependency_pairs and package_by_type:
+        package_order = sorted(
+            set(package_by_type.values()),
+            key=lambda pkg: ( _layer_order("", pkg), pkg ),
+        )
+        for i in range(len(package_order) - 1):
+            src_pkg = package_order[i]
+            # Connect each package to up to 2 downstream packages to avoid overly sparse output.
+            for dst_pkg in package_order[i + 1:i + 3]:
+                if src_pkg != dst_pkg:
+                    package_dependency_pairs.add((src_pkg, dst_pkg))
+
     lines.append("PACKAGE-LEVEL ARROWS (ALL go after all package blocks, never inside):")
     lines.append("  packageA ..> packageB : depends")
     lines.append("")
@@ -586,6 +610,52 @@ def _summarize_component(
             if etype in ("ASSOCIATES", "DEPENDS_ON"):
                 dep_edges.append((src, dst, etype))
                 called.add(dst)
+
+    # JS adapters can miss ASSOCIATES/DEPENDS_ON edges for single-file code.
+    # If no explicit dependencies exist, synthesize a lightweight architectural
+    # flow so component diagrams still include meaningful arrows.
+    if not dep_edges:
+        ordered_tids = sorted(
+            effective_pkg_by_tid.keys(),
+            key=lambda tid: (
+                _layer_order(type_names.get(tid, ""), effective_pkg_by_tid.get(tid, "")),
+                type_names.get(tid, tid),
+            ),
+        )
+
+        grouped: Dict[str, List[str]] = _dd(list)
+        for tid in ordered_tids:
+            grouped[effective_pkg_by_tid.get(tid, "(default)")].append(tid)
+
+        ordered_pkgs = sorted(
+            grouped.keys(),
+            key=lambda pkg: _layer_order("", pkg),
+        )
+
+        for i, src_pkg in enumerate(ordered_pkgs):
+            src_members = grouped.get(src_pkg, [])
+            if not src_members:
+                continue
+
+            # Prefer service/controller-like source for clearer architecture flow.
+            src_tid = min(
+                src_members,
+                key=lambda tid: _layer_order(type_names.get(tid, ""), effective_pkg_by_tid.get(tid, "")),
+            )
+
+            # Connect to next 1-2 downstream architectural packages.
+            downstream = ordered_pkgs[i + 1:i + 3]
+            for dst_pkg in downstream:
+                dst_members = grouped.get(dst_pkg, [])
+                if not dst_members:
+                    continue
+                dst_tid = min(
+                    dst_members,
+                    key=lambda tid: _layer_order(type_names.get(tid, ""), effective_pkg_by_tid.get(tid, "")),
+                )
+                if src_tid != dst_tid:
+                    dep_edges.append((src_tid, dst_tid, "SYNTH"))
+                    called.add(dst_tid)
 
     all_pkgs = list({
         pkg for pkg in effective_pkg_by_tid.values()
@@ -1183,16 +1253,31 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
 
     # ── Class / Sequence diagrams ─────────────────────────────────────────────
     if is_class_diagram:
+        type_ids_with_main_method: Set[str] = set()
+        for tid in type_info.keys():
+            method_nodes: List[Dict[str, Any]] = []
+            for etype, method_id in outgoing.get(tid, []):
+                if etype != "HAS_METHOD":
+                    continue
+                mn = nodes_by_id.get(method_id)
+                if not mn:
+                    continue
+                method_nodes.append(dict(mn.get("attrs", {})))
+            if _has_main_like_method(method_nodes):
+                type_ids_with_main_method.add(tid)
+
         type_info = {
             tid: attrs
             for tid, attrs in type_info.items()
             if not _is_entry_or_demo_type(type_names.get(tid, tid))
+            and tid not in type_ids_with_main_method
             and not _is_class_diagram_noise(type_names.get(tid, tid))
         }
         type_names = {tid: type_names[tid] for tid in type_info}
 
     fields_by_type:  DefaultDict[str, List[str]] = defaultdict(list)
     methods_by_type: DefaultDict[str, List[str]] = defaultdict(list)
+    field_names_by_type: DefaultDict[str, Set[str]] = defaultdict(set)
 
     params_for_method: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
     if is_class_diagram:
@@ -1224,6 +1309,8 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
 
                 if not fname:
                     continue
+
+                field_names_by_type[type_id].add(str(fname).strip().lower())
 
                 sym = _vis_symbol(vis)
                 mod_parts: List[str] = []
@@ -1315,6 +1402,45 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
         if etype == "DEPENDS_ON" and (src, dst) in associate_pairs:
             continue
         rels.append(f"- {etype}: {type_names[src]} -> {type_names[dst]}")
+
+    # JS inputs often miss explicit class-level relationships in CIR.
+    # Synthesize dependencies from collaborator-like field names when needed.
+    if is_class_diagram and not rels:
+        norm_name_by_type: Dict[str, str] = {}
+        for tid, tname in type_names.items():
+            if tid not in type_info:
+                continue
+            cleaned = re.sub(r"[^a-zA-Z0-9]", "", tname).lower()
+            if cleaned:
+                norm_name_by_type[tid] = cleaned
+
+        synthetic_pairs: Set[Tuple[str, str]] = set()
+        for src_tid in type_info.keys():
+            src_fields = field_names_by_type.get(src_tid, set())
+            if not src_fields:
+                continue
+            for dst_tid in type_info.keys():
+                if src_tid == dst_tid:
+                    continue
+                target_norm = norm_name_by_type.get(dst_tid, "")
+                if not target_norm:
+                    continue
+                if any(target_norm in fname for fname in src_fields):
+                    synthetic_pairs.add((src_tid, dst_tid))
+
+        if not synthetic_pairs:
+            ordered_types = sorted(
+                type_info.keys(),
+                key=lambda tid: (
+                    _layer_order(type_names.get(tid, ""), _get(type_info[tid], "package", default="")),
+                    type_names.get(tid, tid),
+                ),
+            )
+            for i in range(len(ordered_types) - 1):
+                synthetic_pairs.add((ordered_types[i], ordered_types[i + 1]))
+
+        for src_tid, dst_tid in sorted(synthetic_pairs, key=lambda p: (type_names.get(p[0], ""), type_names.get(p[1], ""))):
+            rels.append(f"- DEPENDS_ON: {type_names[src_tid]} -> {type_names[dst_tid]}")
 
     lines: List[str] = []
     lines.append("CIR SUMMARY")
