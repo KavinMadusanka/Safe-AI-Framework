@@ -113,6 +113,38 @@ def _index_params_by_method(
     return method_to_params
 
 
+def _index_method_owners(
+    methods_by_type: Dict[str, List[Dict[str, Any]]],
+) -> Dict[str, str]:
+    method_owner_by_id: Dict[str, str] = {}
+    for type_id, methods in methods_by_type.items():
+        for method in methods:
+            method_id = method.get("_id")
+            if method_id:
+                method_owner_by_id[method_id] = type_id
+    return method_owner_by_id
+
+
+def _collect_type_dependency_pairs_from_calls(
+    edges: List[Dict[str, Any]],
+    method_owner_by_id: Dict[str, str],
+) -> Set[Tuple[str, str]]:
+    dependency_pairs: Set[Tuple[str, str]] = set()
+    for edge in edges:
+        if edge.get("type") != "CALLS":
+            continue
+        src_method_id = edge.get("src")
+        dst_method_id = edge.get("dst")
+        if not src_method_id or not dst_method_id:
+            continue
+        src_type_id = method_owner_by_id.get(src_method_id)
+        dst_type_id = method_owner_by_id.get(dst_method_id)
+        if not src_type_id or not dst_type_id or src_type_id == dst_type_id:
+            continue
+        dependency_pairs.add((src_type_id, dst_type_id))
+    return dependency_pairs
+
+
 def _clean_type_for_display(raw_type: str) -> str:
     if not raw_type:
         return "void"
@@ -202,7 +234,6 @@ def _is_infrastructure_noise(name: str, package: str) -> bool:
 
     return False
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  CLASS DIAGRAM
 # ══════════════════════════════════════════════════════════════════════════════
@@ -213,12 +244,50 @@ def generate_class_diagram(cir: Dict[str, Any]) -> str:
         nodes_by_id, edges
     )
     params_by_method = _index_params_by_method(nodes_by_id, edges)
+    method_owner_by_id = _index_method_owners(methods_by_type)
+
+    def _has_main_entry_method(type_id: str) -> bool:
+        for m in methods_by_type.get(type_id, []):
+            method_name = str(m.get("name") or "").strip().lower()
+            if method_name != "main":
+                continue
+
+            modifiers = {str(x).lower() for x in (m.get("modifiers") or ())}
+            is_static = bool(m.get("is_static")) or ("static" in modifiers)
+            if not is_static:
+                continue
+
+            raw_ret = str(m.get("raw_return_type") or m.get("return_type") or "").strip().lower()
+            if raw_ret not in ("", "void", "java.lang.void"):
+                continue
+
+            return True
+        return False
+
+    def _is_class_diagram_noise(type_name: str) -> bool:
+        n = (type_name or "").strip().lower()
+        if n == "bcrypt":
+            return True
+        if n == "config":
+            return True
+        return False
+
+    # Remove entry-point types (Main/Application/Bootstrap or static-main app classes)
+    # from class diagrams.
+    diagram_type_nodes: Dict[str, Dict[str, Any]] = {}
+    for type_id, attrs in type_nodes.items():
+        type_name = attrs.get("name", type_id)
+        if _is_entry_or_demo_type(type_name, methods_by_type.get(type_id, [])) or _has_main_entry_method(type_id):
+            continue
+        if _is_class_diagram_noise(type_name):
+            continue
+        diagram_type_nodes[type_id] = attrs
 
     lines: List[str] = ["@startuml",
                         "skinparam classAttributeIconSize 0",
                         "set namespaceSeparator ."]
 
-    for type_id, t in type_nodes.items():
+    for type_id, t in diagram_type_nodes.items():
         name = t.get("name", "UnknownType")
         kind = (t.get("kind") or "class").lower()
         if kind not in ("class", "interface", "enum"):
@@ -261,13 +330,109 @@ def generate_class_diagram(cir: Dict[str, Any]) -> str:
         lines.append("}")
 
     relation_lines: Set[str] = set()
-    type_name_by_id = {tid: attrs.get("name", tid) for tid, attrs in type_nodes.items()}
+    type_name_by_id = {tid: attrs.get("name", tid) for tid, attrs in diagram_type_nodes.items()}
+
+    # Classify ASSOCIATES pairs into composition / aggregation / association.
+    # Heuristics:
+    # - composition: at least one backing field is final and there is no DEPENDS_ON
+    #   evidence for the same pair (constructor/method usage usually means plain association)
+    # - aggregation: backing field looks collection-like (multiplicity many or container raw type)
+    # - association: fallback
+    def _field_targets_type(field: Dict[str, Any], target_name: str) -> bool:
+        element_type = str(field.get("type_name") or field.get("element_type") or "").strip()
+        if not element_type or not target_name:
+            return False
+        if element_type == target_name:
+            return True
+        if element_type.endswith(f".{target_name}"):
+            return True
+        return False
+
+    def _classify_association_pair(src_type_id: str, dst_type_id: str) -> str:
+        target_name = str(type_name_by_id.get(dst_type_id, ""))
+        if not target_name:
+            return "association"
+
+        candidates = [
+            f for f in fields_by_type.get(src_type_id, [])
+            if _field_targets_type(f, target_name)
+        ]
+        if not candidates:
+            return "association"
+
+        for f in candidates:
+            modifiers = {str(m).lower() for m in (f.get("modifiers") or ())}
+            if "final" in modifiers:
+                return "composition"
+
+        for f in candidates:
+            mult = str(f.get("multiplicity") or "").strip()
+            raw = str(f.get("raw_type") or "").lower()
+            if mult in {"0..*", "1..*", "*"}:
+                return "aggregation"
+            if any(k in raw for k in ("list<", "set<", "map<", "collection<", "[]")):
+                return "aggregation"
+
+        return "association"
+
+    depends_pairs: Set[Tuple[str, str]] = set()
+    for e in edges:
+        src, dst, etype = e.get("src"), e.get("dst"), e.get("type")
+        if etype != "DEPENDS_ON":
+            continue
+        if not src or not dst:
+            continue
+        if src not in diagram_type_nodes or dst not in diagram_type_nodes:
+            continue
+        depends_pairs.add((src, dst))
+
+    association_style_by_pair: Dict[Tuple[str, str], str] = {}
+    for e in edges:
+        src, dst, etype = e.get("src"), e.get("dst"), e.get("type")
+        if etype != "ASSOCIATES":
+            continue
+        if not src or not dst:
+            continue
+        if src not in diagram_type_nodes or dst not in diagram_type_nodes:
+            continue
+        pair = (src, dst)
+        style = _classify_association_pair(src, dst)
+        if style == "composition" and (src, dst) in depends_pairs:
+            style = "association"
+        previous = association_style_by_pair.get(pair)
+        if previous == "composition":
+            continue
+        if previous == "aggregation" and style == "association":
+            continue
+        association_style_by_pair[pair] = style
+
+    explicit_relation_pairs: Set[Tuple[str, str]] = set()
+    for e in edges:
+        src, dst, etype = e.get("src"), e.get("dst"), e.get("type")
+        if not src or not dst or not etype:
+            continue
+        if src not in diagram_type_nodes or dst not in diagram_type_nodes:
+            continue
+        if etype in ("INHERITS", "IMPLEMENTS", "ASSOCIATES", "DEPENDS_ON"):
+            explicit_relation_pairs.add((src, dst))
+
+    # Precompute ASSOCIATES pairs so DEPENDS_ON can be suppressed for the same endpoints.
+    associate_pairs: Set[Tuple[str, str]] = set()
+    for e in edges:
+        src, dst, etype = e.get("src"), e.get("dst"), e.get("type")
+        if etype != "ASSOCIATES":
+            continue
+        if not src or not dst:
+            continue
+        if src not in diagram_type_nodes or dst not in diagram_type_nodes:
+            continue
+        associate_pairs.add((src, dst))
 
     for e in edges:
         src, dst, etype = e.get("src"), e.get("dst"), e.get("type")
         if not src or not dst or not etype:
             continue
-        if src not in type_nodes or dst not in type_nodes:
+        if src not in diagram_type_nodes or dst not in diagram_type_nodes:
             continue
         sn, dn = type_name_by_id[src], type_name_by_id[dst]
         if etype == "INHERITS":
@@ -275,13 +440,34 @@ def generate_class_diagram(cir: Dict[str, Any]) -> str:
         elif etype == "IMPLEMENTS":
             relation_lines.add(f"{sn} ..|> {dn}")
         elif etype == "ASSOCIATES":
+            style = association_style_by_pair.get((src, dst), "association")
             mult = (e.get("attrs") or {}).get("multiplicity")
-            if mult and mult not in ("1", ""):
-                relation_lines.add(f'{sn} --> "{mult}" {dn}')
+            if style == "composition":
+                if mult and mult not in ("1", ""):
+                    relation_lines.add(f'{sn} *-- "{mult}" {dn}')
+                else:
+                    relation_lines.add(f"{sn} *-- {dn}")
+            elif style == "aggregation":
+                if mult and mult not in ("1", ""):
+                    relation_lines.add(f'{sn} o-- "{mult}" {dn}')
+                else:
+                    relation_lines.add(f"{sn} o-- {dn}")
             else:
-                relation_lines.add(f"{sn} --> {dn}")
+                if mult and mult not in ("1", ""):
+                    relation_lines.add(f'{sn} --> "{mult}" {dn}')
+                else:
+                    relation_lines.add(f"{sn} --> {dn}")
         elif etype == "DEPENDS_ON":
+            if (src, dst) in associate_pairs:
+                continue
             relation_lines.add(f"{sn} ..> {dn}")
+
+    for src_type_id, dst_type_id in _collect_type_dependency_pairs_from_calls(edges, method_owner_by_id):
+        if src_type_id not in diagram_type_nodes or dst_type_id not in diagram_type_nodes:
+            continue
+        if (src_type_id, dst_type_id) in explicit_relation_pairs:
+            continue
+        relation_lines.add(f"{type_name_by_id[src_type_id]} ..> {type_name_by_id[dst_type_id]}")
 
     for rel in sorted(relation_lines):
         lines.append(rel)
@@ -289,95 +475,245 @@ def generate_class_diagram(cir: Dict[str, Any]) -> str:
     lines.append("@enduml")
     return "\n".join(lines)
 
-
-def generate_plantuml_from_cir(cir: Dict[str, Any]) -> str:
-    return generate_class_diagram(cir)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  PACKAGE DIAGRAM
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _package_display_name(package: Optional[str]) -> str:
+    package_name = (package or "").strip()
+    return package_name if package_name else "(default)"
+
+
+def _infer_package_from_type_name(type_name: str) -> str:
+    name = (type_name or "").lower()
+
+    if any(k in name for k in ("app", "main", "application", "bootstrap")):
+        return "application"
+    if any(k in name for k in ("controller", "resource", "endpoint", "api", "handler")):
+        return "api"
+    if any(k in name for k in ("service", "manager", "facade", "usecase", "interactor")):
+        return "service"
+    if any(k in name for k in ("repository", "repo", "dao", "store", "database")):
+        return "repository"
+    if any(k in name for k in ("hasher", "auth", "security", "crypto", "encrypt", "token")):
+        return "security"
+    if any(k in name for k in ("entity", "model", "dto", "vo", "record", "user", "student", "account")):
+        return "model"
+    if any(k in name for k in ("util", "helper", "common", "shared", "config")):
+        return "common"
+
+    return "default"
+
+
+def _render_type_declaration(attrs: Dict[str, Any]) -> str:
+    name = attrs.get("name", "UnknownType")
+    kind = (attrs.get("kind") or "class").lower()
+
+    if kind == "interface":
+        return f"interface {name}"
+    if kind == "enum":
+        return f"enum {name}"
+    if attrs.get("is_abstract") or kind == "abstract class":
+        return f"abstract class {name}"
+    return f"class {name}"
+
+# Skip common entry/demo wrapper classes in generated single-file snippets.
+def _is_entry_or_demo_type(name: str, methods: Optional[List[Dict[str, Any]]] = None) -> bool:
+    n = (name or "").lower()
+
+    if any(k in n for k in (
+        "main", "application", "bootstrap", "app", "demo", "example", "sample", "runner", "cli", "program"
+    )):
+        return True
+
+    # Strong signal: Java entry point method.
+    for m in methods or []:
+        if (m.get("name") or "").lower() == "main":
+            return True
+
+    return False
+
+
 def generate_package_diagram(cir: Dict[str, Any]) -> str:
     nodes_by_id, edges = _index_cir(cir)
+    _, fields_by_type, methods_by_type = _extract_types_and_members(nodes_by_id, edges)
+    params_by_method = _index_params_by_method(nodes_by_id, edges)
+    method_owner_by_id = _index_method_owners(methods_by_type)
+
+    # Best-practice defaults for readable architecture diagrams.
+    show_isolated_packages = False
+    infer_missing_dependencies = True
 
     type_nodes: Dict[str, Dict[str, Any]] = {}
     for nid, n in nodes_by_id.items():
         if n.get("kind") == "TypeDecl":
             type_nodes[nid] = n.get("attrs", {})
 
-    package_to_types: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
-    for tid, attrs in type_nodes.items():
-        pkg = attrs.get("package") or "(default)"
-        package_to_types.setdefault(pkg, []).append((tid, attrs))
-
-    type_to_package: Dict[str, str] = {
-        tid: (attrs.get("package") or "(default)")
-        for tid, attrs in type_nodes.items()
-    }
-
-    out: List[str] = [
+    lines: List[str] = [
         "@startuml",
-        "",
-        "' Package diagram — shows physical namespace organisation",
-        "' Classifier names only inside packages (no kind keywords, no members)",
-        "' Arrows represent inter-package dependencies aggregated from type relationships",
-        "",
         "skinparam packageStyle         folder",
         "skinparam classAttributeIconSize 0",
         "skinparam shadowing            false",
-        "",
         "skinparam package {",
         "  FontStyle        Bold",
         "  FontSize         12",
         "}",
-        "",
     ]
 
-    sorted_pkgs = sorted(
-        package_to_types.keys(),
-        key=lambda p: (0 if p == "(default)" else 1, p)
-    )
-
+    package_to_types: Dict[str, List[str]] = {}
+    package_by_type_id: Dict[str, str] = {}
     type_name_by_id: Dict[str, str] = {}
 
-    for pkg in sorted_pkgs:
-        members = sorted(package_to_types[pkg], key=lambda x: x[1].get("name", ""))
-        label = "(default)" if pkg == "(default)" else pkg
+    explicit_package_values: List[str] = [
+        str((attrs.get("package") or "")).strip()
+        for attrs in type_nodes.values()
+        if str((attrs.get("package") or "")).strip()
+    ]
+    has_explicit_package = bool(explicit_package_values)
+    unique_explicit_packages = set(explicit_package_values)
 
-        out.append(f'package "{label}" {{')
-        for tid, attrs in members:
-            name = attrs.get("name", "UnknownType")
-            type_name_by_id[tid] = name
-            out.append(f'  [{name}]')
-        out.append("}")
-        out.append("")
+    def _looks_synthetic_single_package(pkg: str) -> bool:
+        p = (pkg or "").strip()
+        if not p:
+            return False
+        pl = p.lower()
 
-    package_deps: Set[Tuple[str, str]] = set()
+        # Typical synthetic wrappers from snippet/single-file parsing.
+        if pl in {"main", "__main__", "snippet", "module", "script", "app"}:
+            return True
+
+        # Java-like real packages are usually dotted lowercase identifiers.
+        # If dotted, treat as explicit/real package.
+        if "." in p:
+            return False
+
+        # Single CamelCase token is usually synthetic for our parser path.
+        return p[:1].isupper()
+
+    for type_id, attrs in type_nodes.items():
+        type_name = attrs.get("name", type_id)
+        has_main_entry_method = any(
+            str(m.get("name") or "").strip().lower() == "main"
+            for m in methods_by_type.get(type_id, [])
+        )
+
+        package_name = _package_display_name(attrs.get("package"))
+
+        # If every parsed type lands in one explicit module/package (e.g., single-file
+        # Python snippets often become "Main"), switch to role-based grouping to keep
+        # package diagrams architectural and avoid one giant package with no arrows.
+        should_force_inferred_grouping = (
+            has_explicit_package
+            and len(unique_explicit_packages) == 1
+            and _looks_synthetic_single_package(next(iter(unique_explicit_packages)))
+        )
+        if should_force_inferred_grouping or (not has_explicit_package and package_name == "(default)"):
+            if has_main_entry_method:
+                package_name = "application"
+            else:
+                inferred = _infer_package_from_type_name(type_name)
+                if inferred and inferred != "default":
+                    package_name = inferred
+        package_to_types.setdefault(package_name, []).append(_render_type_declaration(attrs))
+        package_by_type_id[type_id] = package_name
+        type_name_by_id[type_id] = type_name
+
+    type_ids_by_short_name: Dict[str, List[str]] = {}
+    for tid, tname in type_name_by_id.items():
+        key = _clean_type_short(tname).lower() or str(tname).lower()
+        type_ids_by_short_name.setdefault(key, []).append(tid)
+
+    def _resolve_target_type_id(raw_type: str, src_type_id: str) -> Optional[str]:
+        short = _clean_type_short(raw_type).lower()
+        if not short:
+            return None
+
+        candidates = type_ids_by_short_name.get(short, [])
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        src_pkg = package_by_type_id.get(src_type_id)
+        same_pkg = [tid for tid in candidates if package_by_type_id.get(tid) == src_pkg]
+        if len(same_pkg) == 1:
+            return same_pkg[0]
+
+        return sorted(candidates)[0]
+
+    package_dependency_pairs: Set[Tuple[str, str]] = set()
+
+    def _add_package_dependency(src_type_id: str, dst_type_id: str) -> None:
+        src_pkg = package_by_type_id.get(src_type_id)
+        dst_pkg = package_by_type_id.get(dst_type_id)
+        if not src_pkg or not dst_pkg or src_pkg == dst_pkg:
+            return
+        package_dependency_pairs.add((src_pkg, dst_pkg))
 
     for e in edges:
         src, dst, etype = e.get("src"), e.get("dst"), e.get("type")
         if not src or not dst or not etype:
             continue
-        if src not in type_nodes or dst not in type_nodes:
+        if src not in package_by_type_id or dst not in package_by_type_id:
             continue
-        if etype not in ("ASSOCIATES", "DEPENDS_ON"):
+        if etype in ("DEPENDS_ON", "ASSOCIATES", "INHERITS", "IMPLEMENTS"):
+            _add_package_dependency(src, dst)
+
+    if infer_missing_dependencies:
+        for src_type_id in package_by_type_id.keys():
+            for f in fields_by_type.get(src_type_id, []):
+                raw_t = str(f.get("raw_type") or f.get("type_name") or "")
+                dst_type_id = _resolve_target_type_id(raw_t, src_type_id)
+                if dst_type_id and dst_type_id != src_type_id:
+                    _add_package_dependency(src_type_id, dst_type_id)
+
+            for m in methods_by_type.get(src_type_id, []):
+                raw_ret = str(m.get("raw_return_type") or m.get("return_type") or "")
+                dst_type_id = _resolve_target_type_id(raw_ret, src_type_id)
+                if dst_type_id and dst_type_id != src_type_id:
+                    _add_package_dependency(src_type_id, dst_type_id)
+
+                method_id = m.get("_id")
+                if not method_id:
+                    continue
+
+                for p in params_by_method.get(method_id, []):
+                    raw_p = str(p.get("raw_type") or p.get("type_name") or "")
+                    dst_type_id = _resolve_target_type_id(raw_p, src_type_id)
+                    if dst_type_id and dst_type_id != src_type_id:
+                        _add_package_dependency(src_type_id, dst_type_id)
+
+    for src_type_id, dst_type_id in _collect_type_dependency_pairs_from_calls(edges, method_owner_by_id):
+        if src_type_id in package_by_type_id and dst_type_id in package_by_type_id:
+            _add_package_dependency(src_type_id, dst_type_id)
+
+    if not show_isolated_packages and package_dependency_pairs:
+        involved_packages: Set[str] = {
+            pkg for src_pkg, dst_pkg in package_dependency_pairs for pkg in (src_pkg, dst_pkg)
+        }
+        package_to_types = {
+            pkg: decls
+            for pkg, decls in package_to_types.items()
+            if pkg in involved_packages
+        }
+
+    if package_to_types:
+        lines.append("")
+
+    for package_name in sorted(package_to_types.keys()):
+        lines.append(f'package "{package_name}" {{')
+        for type_decl in sorted(package_to_types[package_name]):
+            lines.append(f"  {type_decl}")
+        lines.append("}")
+        lines.append("")
+
+    for src_pkg, dst_pkg in sorted(package_dependency_pairs):
+        if src_pkg not in package_to_types or dst_pkg not in package_to_types:
             continue
-        src_pkg = type_to_package.get(src)
-        dst_pkg = type_to_package.get(dst)
-        if src_pkg and dst_pkg and src_pkg != dst_pkg:
-            package_deps.add((src_pkg, dst_pkg))
+        lines.append(f'"{src_pkg}" ..> "{dst_pkg}" : depends')
 
-    if package_deps:
-        out.append("' Inter-package dependencies")
-        for src_pkg, dst_pkg in sorted(package_deps):
-            src_label = "(default)" if src_pkg == "(default)" else src_pkg
-            dst_label = "(default)" if dst_pkg == "(default)" else dst_pkg
-            out.append(f'"{src_label}" ..> "{dst_label}"')
-
-    out.append("")
-    out.append("@enduml")
-    return "\n".join(out)
+    lines.append("@enduml")
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -386,418 +722,198 @@ def generate_package_diagram(cir: Dict[str, Any]) -> str:
 
 def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
     nodes_by_id, edges = _index_cir(cir)
+    type_nodes, _, methods_by_type = _extract_types_and_members(nodes_by_id, edges)
 
-    type_attrs: Dict[str, Dict[str, Any]] = {}
-    for nid, n in nodes_by_id.items():
-        if n.get("kind") == "TypeDecl":
-            type_attrs[nid] = n.get("attrs", {})
+    method_attrs_by_id: Dict[str, Dict[str, Any]] = {}
+    owner_type_by_method_id: Dict[str, str] = {}
+    for type_id, methods in methods_by_type.items():
+        for method in methods:
+            method_id = str(method.get("_id") or "").strip()
+            if not method_id:
+                continue
+            method_attrs_by_id[method_id] = method
+            owner_type_by_method_id[method_id] = type_id
 
-    if not type_attrs:
-        return '@startuml\nnote "No types found in CIR." as N1\n@enduml'
-
-    methods_by_type: Dict[str, List[Dict[str, Any]]] = {t: [] for t in type_attrs}
-    method_owner: Dict[str, str] = {}
-    for e in edges:
-        if e.get("type") == "HAS_METHOD":
-            src, dst = e.get("src"), e.get("dst")
-            if src in type_attrs and dst in nodes_by_id:
-                ma = dict(nodes_by_id[dst].get("attrs", {}))
-                ma["_id"] = dst
-                methods_by_type[src].append(ma)
-                method_owner[dst] = src
-
-    params_by_method: Dict[str, List[Dict[str, Any]]] = {}
-    for e in edges:
-        if e.get("type") == "PARAM_OF":
-            pid, mid = e.get("src"), e.get("dst")
-            if pid and mid:
-                pnode = nodes_by_id.get(pid)
-                if pnode and pnode.get("kind") == "Parameter":
-                    params_by_method.setdefault(mid, []).append(pnode.get("attrs", {}))
-
-    method_name_by_id: Dict[str, str] = {}
-    for nid, n in nodes_by_id.items():
-        if n.get("kind") == "Method":
-            method_name_by_id[nid] = n.get("attrs", {}).get("name", "")
-
-    calls_by_src: Dict[str, List[Dict[str, Any]]] = {}
-    for e in edges:
-        if e.get("type") != "CALLS":
-            continue
-        src_m, dst_m = e.get("src"), e.get("dst")
-        if not src_m or not dst_m:
-            continue
-        if _is_dunder(method_name_by_id.get(dst_m, "")):
-            continue
-        order = (e.get("attrs") or {}).get("order", 0)
-        calls_by_src.setdefault(src_m, []).append({"dst": dst_m, "order": order})
-
-    associates: Dict[str, List[str]] = {t: [] for t in type_attrs}
-    for e in edges:
-        if e.get("type") not in ("ASSOCIATES", "DEPENDS_ON"):
-            continue
-        src, dst = e.get("src"), e.get("dst")
-        if src in type_attrs and dst in type_attrs and src != dst:
-            if dst not in associates[src]:
-                associates[src].append(dst)
-
-    _MODEL_PKG_KW  = {"model", "entity", "domain", "dto", "vo", "bean", "pojo"}
-    _TRIVIAL_PFXS  = ("get", "set", "is", "has")
-    _TRIVIAL_NAMES = {"tostring", "hashcode", "equals", "clone", "compareto"}
-
-    def _is_model(tid: str) -> bool:
-        a   = type_attrs[tid]
-        pkg = (a.get("package") or "").lower()
-        nm  = (a.get("name")    or "").lower()
-        if any(kw in pkg or kw in nm for kw in _MODEL_PKG_KW):
-            return True
-        ms = [m for m in methods_by_type.get(tid, [])
-              if not m.get("is_constructor") and not _is_dunder(m.get("name", ""))]
-        if not ms:
-            return False
-        non_trivial = [m for m in ms
-                       if not any(m.get("name", "").startswith(p) for p in _TRIVIAL_PFXS)
-                       and m.get("name", "").lower() not in _TRIVIAL_NAMES]
-        return len(non_trivial) == 0
-
-    # ── CHANGE 1: separate model_types and noise_types; only exclude noise ──
-    # model_types are kept as participants (rendered with "entity" keyword).
-    # noise_types (Config, Util, Logger, etc.) are still fully excluded.
-    model_types: Set[str] = {t for t in type_attrs if _is_model(t)}
-    noise_types: Set[str] = {
-        t for t in type_attrs
-        if _is_infrastructure_noise(
-            type_attrs[t].get("name", ""),
-            type_attrs[t].get("package", ""),
-        )
+    type_name_by_id: Dict[str, str] = {
+        tid: str(attrs.get("name") or tid) for tid, attrs in type_nodes.items()
     }
-    excluded_types: Set[str] = noise_types  # models are NO LONGER excluded
+    type_package_by_id: Dict[str, str] = {
+        tid: str(attrs.get("package") or "") for tid, attrs in type_nodes.items()
+    }
 
-    def layer(tid: str) -> int:
-        a = type_attrs[tid]
-        return _layer_order(a.get("name", ""), a.get("package", ""))
+    call_edges: List[Tuple[int, str, str]] = []
+    incoming_method_count: Dict[str, int] = {}
+    outgoing_by_method: Dict[str, List[Tuple[int, str]]] = {}
 
-    incoming: Dict[str, int] = {t: 0 for t in type_attrs}
-    for deps in associates.values():
-        for d in deps:
-            incoming[d] = incoming.get(d, 0) + 1
-
-    def build_chain(start: str, visited: Set[str]) -> List[str]:
-        chain = [start]
-        visited = visited | {start}
-        hops = sorted(
-            [d for d in associates.get(start, []) if d not in visited and d not in excluded_types],
-            key=layer,
-        )
-        for hop in hops:
-            chain.extend(build_chain(hop, visited | {hop}))
-        return chain
-
-    # ── CHANGE 2: include all non-noise types (including models) ───────────
-    all_active  = [t for t in type_attrs if t not in excluded_types]
-    sorted_types = sorted(all_active, key=lambda t: (incoming.get(t, 0), layer(t), type_attrs[t].get("name", "")))
-
-    covered: Set[str] = set()
-    chains:  List[List[str]] = []
-    for candidate in sorted_types:
-        if candidate in covered:
+    for edge in edges:
+        if edge.get("type") != "CALLS":
             continue
-        chain = build_chain(candidate, set())
-        if chain:
-            chains.append(chain)
-            covered.update(chain)
+        src_method_id = str(edge.get("src") or "").strip()
+        dst_method_id = str(edge.get("dst") or "").strip()
+        if src_method_id not in method_attrs_by_id or dst_method_id not in method_attrs_by_id:
+            continue
 
-    seen: Set[str] = set()
-    ordered: List[str] = []
-    for chain in sorted(chains, key=lambda c: layer(c[0]) if c else 99):
-        for tid in chain:
-            if tid not in seen:
-                seen.add(tid)
-                ordered.append(tid)
-    for tid in sorted(all_active, key=layer):
-        if tid not in seen:
-            ordered.append(tid)
+        order = int((edge.get("attrs") or {}).get("order", 0))
+        call_edges.append((order, src_method_id, dst_method_id))
+        incoming_method_count[dst_method_id] = incoming_method_count.get(dst_method_id, 0) + 1
+        outgoing_by_method.setdefault(src_method_id, []).append((order, dst_method_id))
 
-    # ── CHANGE 3: _participant_keyword — BCE pattern with entity support ────
-    # Priority order matters:
-    #   database  BEFORE  control  (fixes DatabaseManager → cylinder, not arrow)
-    #   entity    AFTER   database (DAOs are database, models are entity)
-    def _participant_keyword(tid: str) -> str:
-        a   = type_attrs[tid]
-        nm  = (a.get("name")    or "").lower()
-        pkg = (a.get("package") or "").lower()
-        combined = nm + " " + pkg
+    for src_method_id in list(outgoing_by_method.keys()):
+        outgoing_by_method[src_method_id].sort(key=lambda x: (x[0], x[1]))
 
-        # 1. DATABASE — must be before "manager"/"service" to catch DatabaseManager
-        if any(k in combined for k in ("dao", "repository", "repo", "database", "db",
-                                        "persistence", "store", "gateway")):
-            return "database"
+    def _participant_alias(type_id: str) -> str:
+        return "P_" + re.sub(r"[^a-zA-Z0-9_]", "_", type_id)
 
-        # 2. BOUNDARY — REST controllers / API handlers
-        if any(k in combined for k in ("controller", "resource", "endpoint", "rest",
-                                        "handler", "boundary", "api")):
-            return "boundary"
+    def _method_priority(method_id: str) -> Tuple[int, int, int, str, str]:
+        attrs = method_attrs_by_id.get(method_id, {})
+        owner_id = owner_type_by_method_id.get(method_id, "")
+        type_name = str(type_name_by_id.get(owner_id, ""))
+        type_pkg = str(type_package_by_id.get(owner_id, ""))
+        method_name = str(attrs.get("name") or "")
+        incoming_rank = 1 if incoming_method_count.get(method_id, 0) > 0 else 0
+        noise_rank = 1 if _is_infrastructure_noise(type_name, type_pkg) else 0
+        layer_rank = _layer_order(type_name, type_pkg)
+        return (incoming_rank, noise_rank, layer_rank, type_name, method_name)
 
-        # 3. CONTROL — services, managers, use-cases
-        if any(k in combined for k in ("service", "manager", "interactor", "usecase",
-                                        "business", "facade")):
-            return "control"
-
-        # 4. ENTITY — domain models / DTOs / value objects (BCE pattern)
-        if tid in model_types or any(k in combined for k in ("entity", "model",
-                                                               "domain", "dto",
-                                                               "vo", "bean", "pojo")):
-            return "entity"
-
-        return "participant"
-
-    entry_controllers: List[str] = []
-    for tid in ordered:
-        if _participant_keyword(tid) == "boundary":
-            is_called_internally = any(
-                method_owner.get(e.get("dst")) == tid
-                for e in edges
-                if e.get("type") == "CALLS"
-                and method_owner.get(e.get("src")) != tid
-                and method_owner.get(e.get("src")) in seen
-                and method_owner.get(e.get("src")) not in excluded_types
-            )
-            if not is_called_internally:
-                entry_controllers.append(tid)
-
-    _SKIP_PFXS = ("get", "set", "is", "has")
-
-    def useful_methods(type_id: str, max_count: int = 4) -> List[Dict[str, Any]]:
-        result = []
-        for m in methods_by_type.get(type_id, []):
-            n = m.get("name", "")
-            if _is_dunder(n) or m.get("is_constructor"):
-                continue
-            if m.get("visibility", "public") == "private":
-                continue
-            if any(n.startswith(p) for p in _SKIP_PFXS) and len(n) <= 12:
-                continue
-            if n.lower() in _TRIVIAL_NAMES:
-                continue
-            result.append(m)
-        if not result:
-            for m in methods_by_type.get(type_id, []):
-                n = m.get("name", "")
-                if not m.get("is_constructor") and not _is_dunder(n):
-                    if m.get("visibility", "public") != "private":
-                        result.append(m)
-                        if len(result) >= 2:
-                            break
-        return result[:max_count]
-
-    def _safe_type(raw: str) -> str:
-        t = _clean_type_short(raw or "")
-        return t.replace("[]", "").strip()
-
-    def fmt_call(method: Dict[str, Any]) -> str:
-        name   = method.get("name", "call")
-        mid    = method.get("_id", "")
-        params = params_by_method.get(mid, [])[:3]
-        parts  = []
-        for p in params:
-            pn = p.get("name", "")
-            pt = _safe_type(p.get("raw_type") or p.get("type_name") or "")
-            if pn and pt:
-                parts.append(pn + ": " + pt)
-            elif pn:
-                parts.append(pn)
-        suffix = ", ..." if len(params_by_method.get(mid, [])) > 3 else ""
-        return name + "(" + ", ".join(parts) + suffix + ")"
-
-    def fmt_ret(method: Dict[str, Any]) -> Optional[str]:
-        rt = _safe_type(method.get("raw_return_type") or method.get("return_type") or "")
-        if not rt or rt.lower() in ("void", "none", "unit"):
-            return None
-        if rt == "ResponseEntity":
-            return "HTTP Response"
-        if rt.lower() in ("boolean", "bool"):
-            return "boolean"
-        if rt.lower() in ("string", "str"):
-            return "String"
-        return rt
-
-    def _is_list_return(method: Dict[str, Any]) -> bool:
-        rt = (method.get("raw_return_type") or method.get("return_type") or "").lower()
-        return any(k in rt for k in ("list", "collection", "set", "iterable", "[]", "array"))
-
-    def _is_bool_return(method: Dict[str, Any]) -> bool:
-        rt = _safe_type(method.get("raw_return_type") or method.get("return_type") or "")
-        return rt.lower() in ("boolean", "bool")
-
-    out: List[str] = [
+    lines: List[str] = [
         "@startuml",
-        "",
-        "skinparam sequenceArrowThickness 2",
-        "skinparam roundcorner 5",
-        "skinparam maxmessagesize 250",
-        "skinparam responseMessageBelowArrow true",
         "skinparam shadowing false",
-        "",
-        "autoactivate on",
-        "",
+        "skinparam sequenceMessageAlign center",
+        "autonumber",
     ]
 
-    if not ordered:
-        out.append('note "No architectural participants found in CIR." as N1')
-        out.append("@enduml")
-        return "\n".join(out)
+    if call_edges:
+        entry_methods = sorted(outgoing_by_method.keys(), key=_method_priority)
+        entry_method_id = entry_methods[0]
 
-    boundary_names: List[str] = [
-        type_attrs[tid].get("name", tid)
-        for tid in ordered
-        if _participant_keyword(tid) == "boundary"
-    ]
+        chain: List[Tuple[str, str]] = []
+        visited_calls: Set[Tuple[str, str]] = set()
+        cursor = entry_method_id
+        max_steps = 40
 
-    out.append('actor "Client" as Client')
-    for tid in ordered:
-        nm      = type_attrs[tid].get("name", tid)
-        keyword = _participant_keyword(tid)
-        out.append(f'{keyword} "{nm}" as {nm}')
-    out.append("")
+        while len(chain) < max_steps:
+            next_candidates = outgoing_by_method.get(cursor, [])
+            next_method_id: Optional[str] = None
+            for _, dst_method_id in next_candidates:
+                pair = (cursor, dst_method_id)
+                if pair in visited_calls:
+                    continue
+                next_method_id = dst_method_id
+                break
 
-    for ctrl_name in boundary_names:
-        out.append(f"Client -> {ctrl_name} : HTTP Request")
-        out.append(f"{ctrl_name} --> Client : HTTP Response")
-    if boundary_names:
-        out.append("")
+            if not next_method_id:
+                break
 
-    has_arrows   = False
-    shown:       Set[Tuple[str, str, str]] = set()
-    using_calls  = bool(calls_by_src)
+            chain.append((cursor, next_method_id))
+            visited_calls.add((cursor, next_method_id))
+            cursor = next_method_id
 
-    if using_calls:
-        call_triples: List[Tuple[int, str, str, Dict[str, Any]]] = []
-        for src_m, call_list in calls_by_src.items():
-            s_tid = method_owner.get(src_m)
-            if not s_tid or s_tid in excluded_types or s_tid not in seen:
+        if not chain:
+            ordered_edges = sorted(call_edges, key=lambda x: (x[0], x[1], x[2]))
+            chain = [(src, dst) for _, src, dst in ordered_edges[:20]]
+
+        participant_order: List[str] = []
+        seen_participants: Set[str] = set()
+
+        for src_method_id, dst_method_id in chain:
+            src_type_id = owner_type_by_method_id.get(src_method_id, "")
+            dst_type_id = owner_type_by_method_id.get(dst_method_id, "")
+            for type_id in (src_type_id, dst_type_id):
+                if not type_id or type_id in seen_participants:
+                    continue
+                seen_participants.add(type_id)
+                participant_order.append(type_id)
+
+        for type_id in participant_order:
+            display = type_name_by_id.get(type_id, type_id)
+            lines.append(f'participant "{display}" as {_participant_alias(type_id)}')
+
+        if participant_order:
+            lines.append("")
+
+        for src_method_id, dst_method_id in chain:
+            src_type_id = owner_type_by_method_id.get(src_method_id, "")
+            dst_type_id = owner_type_by_method_id.get(dst_method_id, "")
+            if not src_type_id or not dst_type_id:
                 continue
-            s_name = type_attrs[s_tid].get("name", s_tid)
-            for call in call_list:
-                dst_m = call.get("dst")
-                if not dst_m:
-                    continue
-                d_tid = method_owner.get(dst_m)
-                if not d_tid or d_tid in excluded_types or d_tid not in seen:
-                    continue
-                d_name = type_attrs[d_tid].get("name", d_tid)
-                dst_nm = method_name_by_id.get(dst_m, "")
-                if not dst_nm or _is_dunder(dst_nm) or s_name == d_name:
-                    continue
-                mn = nodes_by_id.get(dst_m)
-                if mn:
-                    dummy        = dict(mn.get("attrs", {}))
-                    dummy["_id"] = dst_m
-                else:
-                    dummy = {"name": dst_nm, "_id": dst_m}
-                order = call.get("order", 0)
-                call_triples.append((order, s_name, d_name, dummy))
 
-        call_triples.sort(key=lambda x: x[0])
-        for _, s_name, d_name, dummy in call_triples:
-            dst_nm = dummy.get("name", "call")
-            key = (s_name, d_name, dst_nm)
-            if key in shown:
-                continue
-            shown.add(key)
-            cl      = fmt_call(dummy)
-            rl      = fmt_ret(dummy)
-            is_list = _is_list_return(dummy)
-            is_bool = _is_bool_return(dummy)
-            has_arrows = True
+            dst_method_name = str(method_attrs_by_id.get(dst_method_id, {}).get("name") or "call")
+            msg = _safe_sequence_label(dst_method_name)
+            src_alias = _participant_alias(src_type_id)
+            dst_alias = _participant_alias(dst_type_id)
 
-            if is_list:
-                out.append("loop for each item")
-                out.append("  " + s_name + " -> " + d_name + " : " + cl)
-                out.append("  " + d_name + " --> " + s_name + " : " + (rl or "void"))
-                out.append("end")
-            elif is_bool:
-                out.append("opt if successful")
-                out.append("  " + s_name + " -> " + d_name + " : " + cl)
-                out.append("  " + d_name + " --> " + s_name + " : boolean")
-                out.append("end")
-            else:
-                out.append(s_name + " -> " + d_name + " : " + cl)
-                out.append(d_name + " --> " + s_name + " : " + (rl or "void"))
-        if has_arrows:
-            out.append("")
+            lines.append(f"{src_alias} -> {dst_alias} : {msg}")
 
     else:
-        first_declared = (
-            type_attrs[ordered[0]].get("name", ordered[0]) if ordered else ""
-        )
-        if first_declared:
-            out.append(f'note over {first_declared}')
-            out.append('  Messages inferred from class associations')
-            out.append('  (no CALLS data in CIR — diagram is approximate)')
-            out.append('end note')
-            out.append("")
-
-        assoc_pairs: Set[Tuple[str, str]] = set()
-        for src, dests in associates.items():
-            for dst in dests:
-                if src not in excluded_types and dst not in excluded_types:
-                    assoc_pairs.add((src, dst))
-
-        emitted: Set[Tuple[str, str]] = set()
-        for i in range(len(ordered) - 1):
-            c_tid  = ordered[i]
-            c_name = type_attrs[c_tid].get("name", c_tid)
-            callees = [
-                tid for tid in ordered[i + 1:]
-                if (c_tid, tid) in assoc_pairs and (c_tid, tid) not in emitted
-            ]
-            if not callees:
+        # Fallback: create high-level interaction flow from type dependencies.
+        type_ids: List[str] = []
+        for tid, attrs in type_nodes.items():
+            t_name = str(attrs.get("name") or "")
+            t_pkg = str(attrs.get("package") or "")
+            if _is_entry_or_demo_type(t_name, methods_by_type.get(tid, [])):
                 continue
+            if _is_infrastructure_noise(t_name, t_pkg):
+                continue
+            type_ids.append(tid)
 
-            for e_tid in callees:
-                e_name  = type_attrs[e_tid].get("name", e_tid)
-                emitted.add((c_tid, e_tid))
-                methods = useful_methods(e_tid, max_count=4)
+        type_ids.sort(key=lambda tid: _layer_order(type_name_by_id.get(tid, ""), type_package_by_id.get(tid, "")))
 
-                if not methods:
-                    out.append(c_name + " -> " + e_name + " : request()")
-                    out.append(e_name + " --> " + c_name + " : void")
-                    has_arrows = True
-                    out.append("")
-                    continue
+        relation_pairs: List[Tuple[str, str]] = []
+        for edge in edges:
+            etype = str(edge.get("type") or "")
+            if etype not in {"DEPENDS_ON", "ASSOCIATES"}:
+                continue
+            src = str(edge.get("src") or "").strip()
+            dst = str(edge.get("dst") or "").strip()
+            if src in type_nodes and dst in type_nodes and src != dst:
+                if src in type_ids and dst in type_ids:
+                    relation_pairs.append((src, dst))
 
-                has_arrows = True
-                for m in methods:
-                    cl      = fmt_call(m)
-                    rl      = fmt_ret(m)
-                    is_list = _is_list_return(m)
-                    is_bool = _is_bool_return(m)
-                    shown.add((c_name, e_name, m.get("name", "")))
+        seen_rel: Set[Tuple[str, str]] = set()
+        compact_pairs: List[Tuple[str, str]] = []
+        for src, dst in relation_pairs:
+            if (src, dst) in seen_rel:
+                continue
+            seen_rel.add((src, dst))
+            compact_pairs.append((src, dst))
 
-                    if is_list:
-                        out.append("loop for each item")
-                        out.append("  " + c_name + " -> " + e_name + " : " + cl)
-                        out.append("  " + e_name + " --> " + c_name + " : " + (rl or "void"))
-                        out.append("end")
-                    elif is_bool:
-                        out.append("opt if successful")
-                        out.append("  " + c_name + " -> " + e_name + " : " + cl)
-                        out.append("  " + e_name + " --> " + c_name + " : boolean")
-                        out.append("end")
-                    else:
-                        out.append(c_name + " -> " + e_name + " : " + cl)
-                        out.append(e_name + " --> " + c_name + " : " + (rl or "void"))
+        if not compact_pairs and len(type_ids) >= 2:
+            for i in range(0, min(len(type_ids) - 1, 8)):
+                compact_pairs.append((type_ids[i], type_ids[i + 1]))
 
-                out.append("")
+        participants: List[str] = []
+        seen_participants = set()
+        for src, dst in compact_pairs:
+            if src not in seen_participants:
+                participants.append(src)
+                seen_participants.add(src)
+            if dst not in seen_participants:
+                participants.append(dst)
+                seen_participants.add(dst)
 
-    if not has_arrows:
-        first_p = type_attrs[ordered[0]].get("name", ordered[0]) if ordered else "Client"
-        out.append(f"note over {first_p}")
-        out.append("  No direct method call chains detected.")
-        out.append("end note")
+        if not participants and type_ids:
+            participants = [type_ids[0]]
 
-    out.append("@enduml")
-    return "\n".join(out)
+        for type_id in participants:
+            display = type_name_by_id.get(type_id, type_id)
+            lines.append(f'participant "{display}" as {_participant_alias(type_id)}')
+
+        if participants:
+            lines.append("")
+
+        if compact_pairs:
+            for src, dst in compact_pairs[:20]:
+                lines.append(
+                    f"{_participant_alias(src)} -> {_participant_alias(dst)} : uses()"
+                )
+        elif participants:
+            p = _participant_alias(participants[0])
+            lines.append(f"{p} -> {p} : process()")
+
+    lines.append("@enduml")
+    return "\n".join(lines)
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -806,9 +922,20 @@ def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
 
 def generate_component_diagram(cir: Dict[str, Any]) -> str:
     nodes_by_id, edges = _index_cir(cir)
+    _, _, methods_by_type = _extract_types_and_members(nodes_by_id, edges)
+    method_owner_by_id = _index_method_owners(methods_by_type)
 
     type_nodes:  Dict[str, Dict[str, Any]] = {}
     package_of:  Dict[str, str] = {}
+
+    def _is_component_noise(type_name: str, methods: Optional[List[Dict[str, Any]]]) -> bool:
+        n = (type_name or "").lower()
+        if _is_entry_or_demo_type(type_name, methods):
+            return True
+        # Drop low-level crypto placeholder/helper types from architecture view.
+        if n in {"bcrypt"}:
+            return True
+        return False
 
     for nid, n in nodes_by_id.items():
         if n.get("kind") != "TypeDecl":
@@ -816,7 +943,7 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
         attrs = n.get("attrs", {})
         nm  = attrs.get("name",    "") or ""
         pkg = attrs.get("package", "") or ""
-        if _is_infrastructure_noise(nm, pkg):
+        if _is_component_noise(nm, methods_by_type.get(nid, [])):
             continue
         type_nodes[nid] = attrs
         package_of[nid] = pkg or "(default)"
@@ -828,6 +955,15 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
             if src in type_nodes and dst in type_nodes:
                 if etype in ("ASSOCIATES", "DEPENDS_ON"):
                     dep_edges.append((src, dst, etype))
+
+    for src_type_id, dst_type_id in _collect_type_dependency_pairs_from_calls(edges, method_owner_by_id):
+        if src_type_id in type_nodes and dst_type_id in type_nodes:
+            dep_edges.append((src_type_id, dst_type_id, "CALLS"))
+
+    if dep_edges:
+        involved: Set[str] = {tid for s, d, _ in dep_edges for tid in (s, d)}
+        type_nodes = {tid: attrs for tid, attrs in type_nodes.items() if tid in involved}
+        package_of = {tid: pkg for tid, pkg in package_of.items() if tid in involved}
 
     _LAYERS: List[Tuple[str, str]] = [
         ("controller", "<<Controller>>"),
@@ -856,9 +992,14 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
     ]
 
     def _layer_stereo(pkg: str, name: str) -> Optional[str]:
-        combined = (pkg + " " + name).lower()
+        pkg_l = (pkg or "").lower()
         for kw, stereo in _LAYERS:
-            if kw in combined:
+            if kw in pkg_l:
+                return stereo
+
+        name_l = (name or "").lower()
+        for kw, stereo in _LAYERS:
+            if kw in name_l:
                 return stereo
         return None
 
@@ -876,14 +1017,64 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
     def _iface_alias(tid: str) -> str:
         return "I_" + re.sub(r"[^a-zA-Z0-9_]", "_", tid)
 
+    explicit_pkgs = {p for p in package_of.values() if p and p != "(default)"}
+
+    root_prefix = ""
+    if len(explicit_pkgs) == 1:
+        root_prefix = next(iter(explicit_pkgs))
+    elif len(explicit_pkgs) > 1:
+        parts_list = [p.split(".") for p in explicit_pkgs]
+        common: List[str] = []
+        for segs in zip(*parts_list):
+            if len(set(segs)) == 1:
+                common.append(segs[0])
+            else:
+                break
+        root_prefix = ".".join(common)
+
+    def _inferred_component_group(type_name: str) -> str:
+        name = (type_name or "").lower()
+        if any(k in name for k in ("repository", "repo", "dao", "store")):
+            return "repository"
+        if any(k in name for k in ("database", "db", "connection")):
+            return "database"
+        if any(k in name for k in ("service", "manager", "facade", "interactor", "usecase")):
+            return "service"
+        if any(k in name for k in ("util", "helper", "common", "shared")):
+            return "util"
+        if any(k in name for k in ("model", "entity", "domain", "dto", "record", "vo", "student", "user")):
+            return "model"
+        if any(k in name for k in ("security", "auth", "hasher", "crypto", "token", "encrypt")):
+            return "security"
+        if any(k in name for k in ("controller", "resource", "endpoint", "api", "handler", "rest")):
+            return "api"
+        return "(root)"
+
+    effective_package_of: Dict[str, str] = {}
+    for tid, attrs in type_nodes.items():
+        raw_pkg = package_of.get(tid, "(default)")
+        name = str(attrs.get("name", ""))
+
+        if raw_pkg == "(default)":
+            grp = _inferred_component_group(name)
+            effective_package_of[tid] = grp if grp != "(root)" else "(default)"
+            continue
+
+        if root_prefix and raw_pkg == root_prefix:
+            grp = _inferred_component_group(name)
+            if grp != "(root)":
+                effective_package_of[tid] = f"{root_prefix}.{grp}"
+                continue
+
+        effective_package_of[tid] = raw_pkg
+
     pkg_to_types: Dict[str, List[str]] = {}
     for tid in type_nodes:
-        pkg = package_of[tid]
-        pkg_to_types.setdefault(pkg, []).append(tid)
+        pkg_to_types.setdefault(effective_package_of[tid], []).append(tid)
 
     all_pkgs = [p for p in pkg_to_types if p != "(default)"]
-    root_prefix = ""
-    if len(all_pkgs) > 1:
+
+    if not root_prefix and len(all_pkgs) > 1:
         parts_list = [p.split(".") for p in all_pkgs]
         common: List[str] = []
         for segs in zip(*parts_list):
@@ -902,7 +1093,7 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
         return pkg.rsplit(".", 1)[-1]
 
     called_types: Set[str] = set()
-    for src, dst, _ in dep_edges:
+    for _, dst, _ in dep_edges:
         called_types.add(dst)
 
     out: List[str] = [
@@ -983,7 +1174,7 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
         if pair in arrow_set:
             continue
         arrow_set.add(pair)
-        label = _arrow_label(package_of[dst_id], type_nodes[dst_id].get("name", ""))
+        label = _arrow_label(effective_package_of[dst_id], type_nodes[dst_id].get("name", ""))
         out.append(f"{src_alias} --> {dst_alias} : {label}")
 
     out.append("")
@@ -995,335 +1186,293 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
 #  ACTIVITY DIAGRAM
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _is_boolean_return_type(raw_type: str) -> bool:
+    t = (raw_type or "").strip().lower()
+    return t in {"bool", "boolean"}
+
+
+def _is_collection_return_type(raw_type: str) -> bool:
+    t = (raw_type or "").strip().lower()
+    if not t:
+        return False
+    return any(k in t for k in ("list", "set", "collection", "iterable", "array", "[]"))
+
+
+def _activity_action_label(type_name: str, method_name: str) -> str:
+    tn = (type_name or "UnknownType").strip()
+    mn = (method_name or "method").strip()
+    return f"{tn}.{mn}()"
+
+
+def _is_void_return_type(raw_type: str) -> bool:
+    return (raw_type or "").strip().lower() in {"", "void", "none", "null"}
+
+
+def _is_scalar_return_type(raw_type: str) -> bool:
+    t = (raw_type or "").strip().lower()
+    t = re.sub(r"<.*?>", "", t)
+    primitives = {
+        "int", "integer", "long", "short", "byte",
+        "float", "double", "decimal", "number",
+        "char", "character", "string", "str",
+        "uuid",
+    }
+    return t in primitives
+
+
+def _is_lookup_like_method(method_name: str, raw_ret: str) -> bool:
+    n = (method_name or "").strip().lower()
+    if _is_void_return_type(raw_ret) or _is_boolean_return_type(raw_ret) or _is_collection_return_type(raw_ret):
+        return False
+    if _is_scalar_return_type(raw_ret):
+        return False
+    if n.startswith("get") and not n.startswith("getall"):
+        return True
+    return any(k in n for k in ("find", "fetch", "lookup", "load", "read"))
+
+
+def _is_boolean_guard_method(method_name: str, raw_ret: str) -> bool:
+    n = (method_name or "").strip().lower()
+    if _is_boolean_return_type(raw_ret):
+        return True
+    return any(n.startswith(p) for p in ("is", "has", "can", "should", "verify", "validate", "check"))
+
+
+def _is_collection_iteration_method(method_name: str, raw_ret: str) -> bool:
+    n = (method_name or "").strip().lower()
+    if _is_collection_return_type(raw_ret):
+        return True
+    return any(k in n for k in ("list", "all", "findall", "getall"))
+
+
+def _collection_item_label(raw_type: str) -> str:
+    t = (raw_type or "").strip()
+    m = re.search(r"<\s*([A-Za-z_][A-Za-z0-9_]*)\s*>", t)
+    if m:
+        return m.group(1)
+    if "[]" in t:
+        base = t.replace("[]", "").strip()
+        return base or "item"
+    return "item"
+
+
+def _lookup_found_means_failure(entry_method_name: str) -> bool:
+    n = (entry_method_name or "").strip().lower()
+    return any(k in n for k in ("register", "create", "add", "signup", "enroll"))
+
+
+def _failure_label_for_entry(entry_method_name: str, return_type: str) -> str:
+    name = (entry_method_name or "operation").strip()
+    if _is_boolean_return_type(return_type):
+        return f"{name} failed (return false)"
+    if _is_void_return_type(return_type):
+        return f"{name} aborted"
+    return f"{name} failed (return null)"
+
+
 def generate_activity_diagram(cir: Dict[str, Any]) -> str:
     nodes_by_id, edges = _index_cir(cir)
+    type_nodes, _, methods_by_type = _extract_types_and_members(nodes_by_id, edges)
 
-    type_attrs: Dict[str, Dict[str, Any]] = {}
-    for nid, n in nodes_by_id.items():
-        if n.get("kind") == "TypeDecl":
-            type_attrs[nid] = n.get("attrs", {})
-
-    if not type_attrs:
-        return "@startuml\nstart\n:No types found in CIR.;\nstop\n@enduml"
-
-    methods_by_type: Dict[str, List[Dict[str, Any]]] = {t: [] for t in type_attrs}
-    method_owner: Dict[str, str] = {}
+    # Build method indexes and owner lookups.
     method_attrs_by_id: Dict[str, Dict[str, Any]] = {}
+    owner_type_by_method_id: Dict[str, str] = {}
+    type_name_by_id: Dict[str, str] = {
+        tid: str(attrs.get("name") or tid) for tid, attrs in type_nodes.items()
+    }
 
-    for e in edges:
-        if e.get("type") == "HAS_METHOD":
-            src, dst = e.get("src"), e.get("dst")
-            if src in type_attrs and dst in nodes_by_id:
-                ma = dict(nodes_by_id[dst].get("attrs", {}))
-                ma["_id"] = dst
-                methods_by_type[src].append(ma)
-                method_owner[dst] = src
-                method_attrs_by_id[dst] = ma
+    for type_id, methods in methods_by_type.items():
+        for m in methods:
+            mid = str(m.get("_id") or "").strip()
+            if not mid:
+                continue
+            method_attrs_by_id[mid] = m
+            owner_type_by_method_id[mid] = type_id
 
-    params_by_method: Dict[str, List[Dict[str, Any]]] = {}
-    for e in edges:
-        if e.get("type") == "PARAM_OF":
-            pid, mid = e.get("src"), e.get("dst")
-            if pid and mid:
-                pn = nodes_by_id.get(pid)
-                if pn and pn.get("kind") == "Parameter":
-                    params_by_method.setdefault(mid, []).append(pn.get("attrs", {}))
-
-    calls_by_src: Dict[str, List[Dict[str, Any]]] = {}
+    outgoing_by_method: Dict[str, List[Tuple[int, str]]] = {}
+    incoming_count: Dict[str, int] = {}
     for e in edges:
         if e.get("type") != "CALLS":
             continue
-        src_m, dst_m = e.get("src"), e.get("dst")
-        if not src_m or not dst_m:
+        src = str(e.get("src") or "").strip()
+        dst = str(e.get("dst") or "").strip()
+        if src not in method_attrs_by_id or dst not in method_attrs_by_id:
             continue
-        dst_nm = (nodes_by_id.get(dst_m) or {}).get("attrs", {}).get("name", "")
-        if _is_dunder(dst_nm):
-            continue
-        order = (e.get("attrs") or {}).get("order", 0)
-        calls_by_src.setdefault(src_m, []).append({"dst": dst_m, "order": order})
+        order = int((e.get("attrs") or {}).get("order", 0))
+        outgoing_by_method.setdefault(src, []).append((order, dst))
+        incoming_count[dst] = incoming_count.get(dst, 0) + 1
 
-    for src_m in calls_by_src:
-        calls_by_src[src_m].sort(key=lambda x: x.get("order", 0))
+    for src in list(outgoing_by_method.keys()):
+        outgoing_by_method[src].sort(key=lambda x: (x[0], x[1]))
 
-    _MODEL_PKG_KW     = {"model", "entity", "domain", "dto", "vo", "bean", "pojo"}
-    _BEHAVIOUR_PKG_KW = {"util", "utils", "helper", "helpers", "service", "services",
-                         "manager", "managers", "dao", "repository", "config"}
-    _BEHAVIOUR_SFXS   = ("util", "utils", "helper", "helpers", "service", "manager",
-                         "dao", "repo", "repository", "config", "factory")
-    _TRIVIAL_PFXS     = ("get", "set", "is", "has")
-    _TRIVIAL_NAMES    = {"tostring", "hashcode", "equals", "clone", "compareto"}
+    method_candidates = [mid for mid in outgoing_by_method.keys() if mid in method_attrs_by_id]
 
-    def _is_pure_model(tid: str) -> bool:
-        a   = type_attrs[tid]
-        pkg = (a.get("package") or "").lower()
-        nm  = (a.get("name")    or "").lower()
-        if any(kw in pkg for kw in _BEHAVIOUR_PKG_KW):
-            return False
-        if any(nm.endswith(sfx) for sfx in _BEHAVIOUR_SFXS):
-            return False
-        if any(kw in pkg or kw in nm for kw in _MODEL_PKG_KW):
-            return True
-        ms = [m for m in methods_by_type.get(tid, [])
-              if not m.get("is_constructor") and not _is_dunder(m.get("name", ""))]
-        if not ms:
-            return False
-        non_trivial = [m for m in ms
-                       if not any(m.get("name", "").startswith(p) for p in _TRIVIAL_PFXS)
-                       and m.get("name", "").lower() not in _TRIVIAL_NAMES]
-        return len(non_trivial) == 0
+    def _method_priority(mid: str) -> Tuple[int, int, int, str, str]:
+        m = method_attrs_by_id[mid]
+        type_id = owner_type_by_method_id.get(mid, "")
+        t_attrs = type_nodes.get(type_id, {})
+        type_name = str(t_attrs.get("name") or "")
+        type_pkg = str(t_attrs.get("package") or "")
+        method_name = str(m.get("name") or "")
 
-    excluded: Set[str] = {
-        t for t in type_attrs
-        if _is_pure_model(t) or _is_infrastructure_noise(
-            type_attrs[t].get("name", ""),
-            type_attrs[t].get("package", ""),
+        # Prefer root-like orchestrator methods:
+        # - no incoming calls
+        # - not demo/entry wrappers
+        # - higher-level architectural layers
+        incoming = incoming_count.get(mid, 0)
+        is_demo = _is_entry_or_demo_type(type_name, methods_by_type.get(type_id, []))
+
+        method_rank = 5
+        name_l = method_name.lower()
+        if name_l in {"start", "run", "execute", "process", "handle", "main"}:
+            method_rank = 0
+        elif any(k in name_l for k in ("login", "register", "create", "update", "delete", "get", "list")):
+            method_rank = 1
+
+        return (
+            1 if incoming > 0 else 0,
+            1 if is_demo else 0,
+            _layer_order(type_name, type_pkg),
+            method_rank,
+            f"{type_name}.{method_name}",
         )
-    }
 
-    active_types = {t: a for t, a in type_attrs.items() if t not in excluded}
-    if not active_types:
-        active_types = {t: a for t, a in type_attrs.items() if not _is_pure_model(t)}
-    if not active_types:
-        active_types = dict(type_attrs)
+    ordered_methods = sorted(method_candidates, key=_method_priority)
 
-    sorted_type_ids: List[str] = sorted(
-        active_types.keys(),
-        key=lambda t: _layer_order(
-            active_types[t].get("name", ""),
-            active_types[t].get("package", ""),
-        ),
-    )
-
-    def _safe_label(text: str) -> str:
-        return text.replace("<", "(").replace(">", ")").replace("|", "/")
-
-    def _fmt_action(method_id: str, method_name: str, owner_name: str) -> str:
-        params = params_by_method.get(method_id, [])[:2]
-        parts: List[str] = []
-        for p in params:
-            pn = p.get("name", "")
-            pt = _clean_type_short(p.get("raw_type") or p.get("type_name") or "")
-            if pn and pt:
-                parts.append(f"{pn}: {pt}")
-            elif pn:
-                parts.append(pn)
-        suffix = ", ..." if len(params_by_method.get(method_id, [])) > 2 else ""
-        raw = f"{owner_name}.{method_name}({', '.join(parts)}{suffix})"
-        return _safe_label(raw)
-
-    def _is_loop(mid: str) -> bool:
-        ma = method_attrs_by_id.get(mid) or {}
-        rt = (ma.get("raw_return_type") or ma.get("return_type") or "").lower()
-        return any(k in rt for k in ("list", "collection", "set", "iterable", "[]", "array"))
-
-    def _is_guard(mid: str) -> bool:
-        ma    = method_attrs_by_id.get(mid) or {}
-        name  = (ma.get("name") or "").lower()
-        rt    = _clean_type_short(
-                    ma.get("raw_return_type") or ma.get("return_type") or ""
-                ).lower()
-        if rt in ("boolean", "bool"):
-            return True
-        if "optional" in rt:
-            return True
-        _GUARD_PFXS = ("validate", "check", "verify", "ensure", "assert",
-                       "exists", "existsby", "is", "has", "can", "allow")
-        if any(name.startswith(p) for p in _GUARD_PFXS):
-            return True
-        return False
-
-    def _guard_label(dst_mname: str, mid: str) -> str:
-        ma   = method_attrs_by_id.get(mid) or {}
-        name = dst_mname
-        rt   = _clean_type_short(
-                   ma.get("raw_return_type") or ma.get("return_type") or ""
-               ).lower()
-        if "optional" in rt:
-            subject = re.sub(
-                r"^(?:findBy|getBy|loadBy|fetchBy|searchBy|"
-                r"find|get|load|fetch|lookup|query|retrieve)",
-                "", name
-            ).strip()
-            if subject:
-                subject = re.sub(r"([A-Z])", lambda m: " " + m.group(1), subject).strip().lower()
-            else:
-                subject = "result"
-            return f"{subject} found?"
-        nl = name.lower()
-        if nl.startswith("existsby"):
-            subject, suffix = name[len("existsBy"):], " exists?"
-        elif nl.startswith("exists"):
-            subject, suffix = name[len("exists"):], " exists?"
-        elif nl.startswith("validateby"):
-            subject, suffix = name[len("validateBy"):], " valid?"
-        elif nl.startswith("validate"):
-            subject, suffix = name[len("validate"):], " valid?"
-        elif nl.startswith("verifyby"):
-            subject, suffix = name[len("verifyBy"):], " valid?"
-        elif nl.startswith("verify"):
-            subject, suffix = name[len("verify"):], " valid?"
-        elif nl.startswith("checkby"):
-            subject, suffix = name[len("checkBy"):], " correct?"
-        elif nl.startswith("check"):
-            subject, suffix = name[len("check"):], " correct?"
-        elif nl.startswith("ensure"):
-            subject, suffix = name[len("ensure"):], " satisfied?"
-        elif nl.startswith("has"):
-            subject, suffix = name[len("has"):], "?"
-        elif nl.startswith("is"):
-            subject, suffix = name[len("is"):], "?"
-        elif nl.startswith("can"):
-            subject, suffix = name[len("can"):], "?"
-        elif nl.startswith("allow"):
-            subject, suffix = name[len("allow"):], " allowed?"
-        else:
-            subject, suffix = name, "?"
-        if not subject:
-            subject = name
-        subject = re.sub(r"([A-Z])", lambda m: " " + m.group(1), subject).strip().lower()
-        return f"{subject}{suffix}"
-
-    src_layer: Dict[str, Tuple[int, int]] = {}
-    for src_m, call_list in calls_by_src.items():
-        src_type = method_owner.get(src_m)
-        if not src_type or src_type not in active_types:
-            continue
-        src_attrs = method_attrs_by_id.get(src_m) or {}
-        src_nm    = src_attrs.get("name", "")
-        src_vis   = src_attrs.get("visibility", "public")
-        if src_vis == "private":
-            continue
-        if src_nm.startswith("_") and not src_nm.startswith("__"):
-            continue
-        layer     = _layer_order(
-            active_types[src_type].get("name", ""),
-            active_types[src_type].get("package", ""),
-        )
-        earliest  = min((c.get("order", 0) for c in call_list), default=0)
-        src_layer[src_m] = (layer, earliest)
-
-    sorted_callers = sorted(src_layer.keys(), key=lambda m: src_layer[m])
-
-    all_calls: List[Tuple[int, str, str]] = []
-    for src_m in sorted_callers:
-        for call in sorted(calls_by_src[src_m], key=lambda c: c.get("order", 0)):
-            dst_m = call.get("dst")
-            if not dst_m:
-                continue
-            dst_type = method_owner.get(dst_m)
-            if not dst_type or dst_type not in active_types:
-                continue
-            dst_attrs = method_attrs_by_id.get(dst_m) or {}
-            dst_vis   = dst_attrs.get("visibility", "public")
-            dst_nm    = dst_attrs.get("name", "")
-            if dst_vis == "private":
-                continue
-            if dst_nm.startswith("_") and not dst_nm.startswith("__"):
-                continue
-            all_calls.append((src_layer[src_m][0], src_m, dst_m))
-
-    use_primary = bool(all_calls)
-
-    out: List[str] = [
+    lines: List[str] = [
         "@startuml",
-        "",
-        "skinparam shadowing               false",
-        "skinparam activityBorderColor     #000000",
+        "skinparam shadowing false",
+        "skinparam activityBorderColor #000000",
         "skinparam activityBackgroundColor #ffffff",
-        "skinparam activityFontColor       #000000",
-        "skinparam activityFontSize        13",
-        "skinparam arrowColor              #000000",
-        "skinparam ActivityDiamondBorderColor     #000000",
+        "skinparam activityFontColor #000000",
+        "skinparam activityFontSize 13",
+        "skinparam ActivityDiamondBorderColor #000000",
         "skinparam ActivityDiamondBackgroundColor #ffffff",
-        "skinparam ActivityDiamondFontColor       #000000",
-        "",
+        "skinparam ActivityDiamondFontColor #000000",
         "start",
-        "",
     ]
 
-    if use_primary:
-        MAX_PER_CALLER   = 8
-        MAX_GLOBAL_REPS  = 3
-
-        per_caller_emitted: Set[Tuple[str, str]] = set()
-        per_caller_count: Dict[str, int] = {}
-        global_count: Dict[str, int] = {}
-
-        for _, src_m, dst_m in all_calls:
-            src_type = method_owner.get(src_m, "")
-
-            key = (src_type, dst_m)
-            if key in per_caller_emitted:
+    if not ordered_methods:
+        # Fallback when CALLS are missing in CIR.
+        fallback_method: Optional[Tuple[str, Dict[str, Any], str]] = None
+        for type_id, methods in methods_by_type.items():
+            t_attrs = type_nodes.get(type_id, {})
+            type_name = str(t_attrs.get("name") or "")
+            if _is_entry_or_demo_type(type_name, methods):
                 continue
-            per_caller_emitted.add(key)
+            for m in methods:
+                if m.get("is_constructor"):
+                    continue
+                name = str(m.get("name") or "")
+                if not name or _is_dunder(name):
+                    continue
+                fallback_method = (type_id, m, type_name)
+                break
+            if fallback_method:
+                break
 
-            if per_caller_count.get(src_type, 0) >= MAX_PER_CALLER:
-                continue
-            per_caller_count[src_type] = per_caller_count.get(src_type, 0) + 1
+        if fallback_method:
+            _, m, type_name = fallback_method
+            lines.append(f":{_activity_action_label(type_name, str(m.get('name') or 'method'))};")
+        else:
+            lines.append(":Execute workflow;")
 
-            if global_count.get(dst_m, 0) >= MAX_GLOBAL_REPS:
-                continue
-            global_count[dst_m] = global_count.get(dst_m, 0) + 1
+        lines.append("stop")
+        lines.append("@enduml")
+        return "\n".join(lines)
 
-            dst_type  = method_owner.get(dst_m, "")
-            dst_name  = (type_attrs.get(dst_type) or {}).get("name", dst_type)
-            dst_mname = (nodes_by_id.get(dst_m) or {}).get("attrs", {}).get("name", "")
+    entry_method_id = ordered_methods[0]
 
-            if not dst_mname or _is_dunder(dst_mname):
-                continue
+    # Walk the dominant ordered CALLS chain.
+    chain: List[str] = [entry_method_id]
+    visited: Set[str] = {entry_method_id}
+    cursor = entry_method_id
+    max_steps = 25
+    while len(chain) < max_steps:
+        next_candidates = outgoing_by_method.get(cursor, [])
+        next_id: Optional[str] = None
+        for _, dst in next_candidates:
+            if dst not in visited:
+                next_id = dst
+                break
+        if not next_id:
+            break
+        chain.append(next_id)
+        visited.add(next_id)
+        cursor = next_id
 
-            action = _fmt_action(dst_m, dst_mname, dst_name)
+    entry_method = method_attrs_by_id.get(entry_method_id, {})
+    entry_method_name = str(entry_method.get("name") or "operation")
+    entry_return_type = str(entry_method.get("raw_return_type") or entry_method.get("return_type") or "")
 
-            if _is_loop(dst_m):
-                out.append("repeat")
-                out.append(f"  :{action};")
-                out.append("repeat while (more items?) is (yes) -> no;")
+    used_lookup_branch = False
+    used_boolean_branch = False
+    used_collection_loop = False
 
-            elif _is_guard(dst_m):
-                cond = _safe_label(_guard_label(dst_mname, dst_m))
-                out.append(f"if ({cond}) then (yes)")
-                out.append(f"  :{action};")
-                out.append("else (no)")
-                out.append("  :handle error / return;")
-                out.append("endif")
+    for mid in chain:
+        m = method_attrs_by_id.get(mid, {})
+        type_id = owner_type_by_method_id.get(mid, "")
+        type_name = type_name_by_id.get(type_id, "UnknownType")
+        method_name = str(m.get("name") or "method")
+        raw_ret = str(m.get("raw_return_type") or m.get("return_type") or "")
+        action_label = _activity_action_label(type_name, method_name)
 
+        lines.append(f":{action_label};")
+
+        if not used_lookup_branch and _is_lookup_like_method(method_name, raw_ret):
+            if _lookup_found_means_failure(entry_method_name):
+                lines.append(f"if ({action_label} returned value?) then (exists)")
+                lines.append(f"  :{_failure_label_for_entry(entry_method_name, entry_return_type)};")
+                lines.append("  stop")
+                lines.append("else (not found)")
+                lines.append("  :Proceed with registration;")
+                lines.append("endif")
             else:
-                out.append(f":{action};")
+                lines.append(f"if ({action_label} returned value?) then (found)")
+                lines.append("  :Proceed with retrieved entity;")
+                lines.append("else (not found)")
+                lines.append(f"  :{_failure_label_for_entry(entry_method_name, entry_return_type)};")
+                lines.append("  stop")
+                lines.append("endif")
+            used_lookup_branch = True
+            continue
 
-    else:
-        out.append(":Approximate flow — no call chain data available;")
-        out.append("")
+        if not used_boolean_branch and _is_boolean_guard_method(method_name, raw_ret):
+            lines.append(f"if ({action_label} is true?) then (yes)")
+            lines.append(f"  :{entry_method_name} check passed;")
+            lines.append("else (no)")
+            lines.append(f"  :{_failure_label_for_entry(entry_method_name, entry_return_type)};")
+            lines.append("  stop")
+            lines.append("endif")
+            used_boolean_branch = True
+            continue
 
-        any_emitted = False
-        for type_id in sorted_type_ids:
-            type_name    = active_types[type_id].get("name", type_id)
-            lane_name    = re.sub(r"[^\w ]", "", type_name).strip() or "System"
-            type_methods = [
-                m for m in methods_by_type.get(type_id, [])
-                if not m.get("is_constructor")
-                and not _is_dunder(m.get("name", ""))
-                and m.get("visibility", "public") != "private"
-                and not any(m.get("name", "").startswith(p) for p in _TRIVIAL_PFXS)
-                and m.get("name", "").lower() not in _TRIVIAL_NAMES
-            ]
-            if not type_methods:
-                continue
+        if not used_collection_loop and _is_collection_iteration_method(method_name, raw_ret):
+            item_label = _collection_item_label(raw_ret)
+            lines.append(f"while ({action_label} has more items?) is (yes)")
+            lines.append(f"  :Process {item_label};")
+            lines.append("endwhile (no)")
+            used_collection_loop = True
 
-            out.append(f"|{lane_name}|")
-            any_emitted = True
+    if not used_lookup_branch and not used_boolean_branch and len(chain) >= 2:
+        # Fallback decision when we only have linear calls but no clear semantic guard.
+        guard_mid = chain[1]
+        guard_m = method_attrs_by_id.get(guard_mid, {})
+        guard_tid = owner_type_by_method_id.get(guard_mid, "")
+        guard_type_name = type_name_by_id.get(guard_tid, "UnknownType")
+        guard_label = _activity_action_label(guard_type_name, str(guard_m.get("name") or "method"))
+        lines.append(f"if ({guard_label} succeeded?) then (yes)")
+        lines.append(f"  :{entry_method_name} continues;")
+        lines.append("else (no)")
+        lines.append(f"  :{_failure_label_for_entry(entry_method_name, entry_return_type)};")
+        lines.append("  stop")
+        lines.append("endif")
 
-            for m in type_methods[:6]:
-                mname  = m.get("name", "method")
-                mid    = m.get("_id", "")
-                action = _fmt_action(mid, mname, type_name)
-                out.append(f":{action};")
+    lines.append("stop")
+    lines.append("@enduml")
+    return "\n".join(lines)
 
-        if not any_emitted:
-            out.append("|System|")
-            out.append(":No public methods found;")
 
-    out.append("")
-    out.append("stop")
-    out.append("")
-    out.append("@enduml")
-    return "\n".join(out)
+def generate_plantuml_from_cir(cir: Dict[str, Any]) -> str:
+    return generate_class_diagram(cir)
+

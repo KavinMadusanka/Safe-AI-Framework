@@ -94,12 +94,16 @@ Relationships (outside class blocks):
   ClassA --> ClassB         (association)
   ClassA ..> ClassB         (dependency)
 
+If the same pair appears as both association and dependency, emit only one arrow.
+Prefer association (--> ) over dependency (..>) for the same pair.
+
 CRITICAL DO-NOT:
   1. Do NOT include constructors.
   2. Do NOT use colored icons, stereotypes, or markers on members.
   3. Do NOT wrap classes in package {} or namespace {} blocks.
   4. Do NOT use fully-qualified names (use Foo not com.example.sms.Foo).
-  5. Include ALL fields and methods from the context. Do NOT omit or invent any.
+    5. Do NOT include launcher/wrapper types such as Main, App, Application, Bootstrap, Demo, Example, Sample, Runner, Cli, or Program when they only start the system.
+    6. Include ALL fields and methods from the context. Do NOT omit or invent any.
 """.strip()
 
 _PACKAGE_SYSTEM = _BASE_SYSTEM + """
@@ -137,16 +141,17 @@ TYPE KEYWORDS INSIDE — use ONLY the keyword + short name, NO curly braces, NO 
   enum EnumName
 
 RELATIONSHIP ARROWS — place ALL arrows AFTER all package blocks (never inside):
-  StudentDAO --> DatabaseUtil
-  StudentDAO ..|> IStudentDAO
-  StudentService --> IStudentDAO
-  StudentService ..> Student
+    "com.example.sms.service" ..> "com.example.sms.repository" : depends
+    "com.example.sms.service" ..> "com.example.sms.model" : depends
+    "com.example.sms.repository" ..> "com.example.sms.model" : depends
+
+Only draw package-to-package arrows. Do NOT draw class-to-class arrows in package diagrams.
+If the same package pair can be inferred more than once, emit only one arrow.
 
 Arrow types:
   --|>   inheritance (extends)
   ..|>   implementation (implements)
-  -->    association (strong dependency)
-  ..>    dependency (weak/uses)
+    ..>    package dependency (uses / depends on)
 
 CRITICAL DO-NOT:
   1. Do NOT add curly braces { } after type names inside packages.
@@ -160,6 +165,8 @@ CRITICAL DO-NOT:
      at the TOP LEVEL — never write  package "com" { package "example" { ... } }
      WRONG:  package "com" { package "example" { class Foo } }
      RIGHT:  package "com.example" { class Foo }
+    9. Do NOT include launcher/wrapper types such as Main, App, Application, Bootstrap, Demo, Example, Sample, Runner, Cli, or Program when they only start the system.
+    10. Do NOT draw type-level arrows in package diagrams.
 """.strip()
 
 _SEQUENCE_SYSTEM = _BASE_SYSTEM + """
@@ -295,6 +302,11 @@ DEPENDENCY ARROWS — after the root package block, target the lollipop alias:
   t_Ctrl  --> I_t_Student : maps
   t_Svc   --> I_t_Student : maps
 
+Only draw real architectural dependencies. Do NOT emit multiple arrows for the same pair.
+Prefer specific labels like delegates, queries, or maps. Use uses only as a last resort.
+Do NOT include launcher/wrapper components such as Main, App, Application, Bootstrap,
+Demo, Example, Sample, Runner, Cli, or Program when they only start the system.
+
 Arrow labels: uses / delegates / queries / maps / implements
 
 CRITICAL DO-NOT:
@@ -306,6 +318,10 @@ CRITICAL DO-NOT:
   6. Do NOT add class body members (fields, methods) inside components.
   7. Do NOT add colors.
   8. Do NOT use ..|> or --|> inside a component diagram — use --> arrows with labels only.
+    9. Avoid generic uses arrows when a more specific label fits.
+    10. Do NOT include launcher/wrapper types such as Main, App, Application, Bootstrap, Demo, Example, Sample, Runner, Cli, or Program when they only start the system.
+        11. If context has more than one component, output dependency arrows after package blocks.
+        12. Do NOT output a component diagram with zero arrows unless context explicitly says no dependencies.
 """.strip()
 
 _ACTIVITY_SYSTEM = _BASE_SYSTEM + """
@@ -445,7 +461,11 @@ Output MUST begin with these lines exactly:
   }
 
 RULES (violations = wrong diagram):
-- Full FQN for every package label:  package "com.example.app.service" { ... }
+- If the source has explicit packages, use the full FQN for every package label:
+    package "com.example.app.service" { ... }
+- If the source has no real package declarations or only a synthetic root like
+    Main / __main__ / snippet, infer architectural packages instead of keeping
+    one giant default package.
 - Inside packages: ONLY keyword + name, no braces, no members:
     class ClassName
     interface InterfaceName
@@ -456,6 +476,12 @@ RULES (violations = wrong diagram):
 - NEVER nest package blocks — ALL packages must be flat at the top level:
     WRONG:  package "com" { package "example" { class Foo } }
     RIGHT:  package "com.example" { class Foo }  ..>
+- If the source file has no package declarations, infer synthetic packages from
+    class roles instead of collapsing everything into (default): model, service,
+    repository, database, security, util. Exclude launcher/demo classes.
+- Draw package-to-package arrows between those inferred packages when the code
+    is a single-file architecture.
+- Do NOT draw type-level arrows in package diagrams.
 """.strip()
 
 _SEQUENCE_REMINDER = """
@@ -496,6 +522,9 @@ Output MUST begin with these lines exactly:
 RULES (violations = wrong diagram):
 - Root package = full FQN:  package "com.example.sms" { ... }
 - Sub-packages = short name + stereotype:  package "service" <<Service>> { ... }
+- If classes come from a single-file app with one package, still split them into
+    inferred architectural sub-packages: service, repository, database, security,
+    model, util (keep launcher/demo wrappers excluded).
 - Every class → [ClassName] as alias
 - Every depended-on component → three consecutive lines:
     () "ClassName" as I_alias
@@ -551,7 +580,15 @@ ABSOLUTE RULE — NEVER mix swimlane markers with structured blocks:
 - Use 'ClassName.method(params)' format in :action; labels.
 - [GUARD] calls → if (...) then (yes) ... else (no) ... endif
 - [LOOP] calls  → repeat ... repeat while (more items?) is (yes) -> no;
-- Follow the ORDERED CALL CHAIN from the context exactly.
+- Follow the ordered call chain and the entrypoint/demo flow sections from the
+    context; do not stop at the first branch.
+- If the context shows a single-file demo app, start from the entrypoint/main
+    flow and include the full business workflow, not only the first CRUD branch.
+- When multiple service methods exist, prefer a broader activity with several
+    major operations (register, authenticate, list, update, delete, search) in
+    the order indicated by the context.
+- Do NOT reduce the diagram to a tiny branch if the context contains a richer
+    entrypoint/demo flow.
 """.strip()
 
 _REMINDERS = {
@@ -748,6 +785,68 @@ def _flatten_package_diagram(plantuml: str, known_fqns: list = None) -> str:
     return "\n".join(out)
 
 
+def _wrap_single_file_package_diagram(plantuml: str, known_fqns: list = None) -> str:
+    # Only apply for inferred single-file layouts (no known explicit FQNs).
+    if known_fqns:
+        return plantuml
+
+    lines = plantuml.splitlines()
+    pkg_indices = []
+    pkg_names = []
+
+    for idx, line in enumerate(lines):
+        m = re.match(r'^\s*package\s+"([^"]+)"\s*\{\s*$', line)
+        if m:
+            pkg_indices.append(idx)
+            pkg_names.append(m.group(1).strip())
+
+    # Skip if not an inferred architectural package layout.
+    if len(pkg_indices) < 2:
+        return plantuml
+    if any("." in name for name in pkg_names):
+        return plantuml
+    if any(re.match(r'^\s*frame\s+"Application"\s*\{\s*$', line) for line in lines):
+        return plantuml
+
+    # Find the contiguous package-block region and wrap it in a frame.
+    start_idx = pkg_indices[0]
+    end_idx = start_idx
+    depth = 0
+    started = False
+
+    for i in range(start_idx, len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        if lines[i].count("{") > 0:
+            started = True
+        if started and depth == 0:
+            end_idx = i
+            j = i + 1
+            while j < len(lines):
+                if re.match(r'^\s*$', lines[j]):
+                    end_idx = j
+                    j += 1
+                    continue
+                if re.match(r'^\s*package\s+"([^"]+)"\s*\{\s*$', lines[j]):
+                    break
+                break
+            if j < len(lines) and re.match(r'^\s*package\s+"([^"]+)"\s*\{\s*$', lines[j]):
+                continue
+            break
+
+    wrapped = []
+    wrapped.extend(lines[:start_idx])
+    wrapped.append('frame "Application" {')
+    for line in lines[start_idx:end_idx + 1]:
+        if line.strip():
+            wrapped.append("  " + line)
+        else:
+            wrapped.append("")
+    wrapped.append("}")
+    wrapped.extend(lines[end_idx + 1:])
+
+    return "\n".join(wrapped)
+
+
 def _fix_component_assembly_connectors(plantuml: str) -> str:
     comp_aliases: dict = {}
     for line in plantuml.splitlines():
@@ -770,6 +869,203 @@ def _fix_component_assembly_connectors(plantuml: str) -> str:
                     result.append(" " * indent + connector)
 
     return "\n".join(result)
+
+
+def _inject_class_arrows_if_missing(plantuml: str) -> str:
+    # Keep model output if relationships already exist.
+    if re.search(r"(?m)^\s*\w[\w.]*\s*(--\|>|\.\.\|>|-->|\.\.>)\s*\w[\w.]*", plantuml):
+        return plantuml
+
+    type_names: list[str] = []
+    for line in plantuml.splitlines():
+        m = re.match(r"^\s*(?:abstract\s+class|class|interface|enum)\s+([A-Za-z_]\w*)\b", line)
+        if m:
+            type_names.append(m.group(1))
+
+    if len(type_names) < 2:
+        return plantuml
+
+    def _rank(name: str) -> int:
+        n = name.lower()
+        if any(k in n for k in ("controller", "resource", "endpoint", "handler", "api")):
+            return 10
+        if any(k in n for k in ("service", "manager", "facade", "usecase", "interactor")):
+            return 20
+        if any(k in n for k in ("repository", "repo", "dao", "store")):
+            return 30
+        if any(k in n for k in ("database", "db")):
+            return 40
+        if any(k in n for k in ("model", "entity", "dto", "domain")):
+            return 50
+        if any(k in n for k in ("util", "helper", "config")):
+            return 60
+        return 55
+
+    ordered = sorted(dict.fromkeys(type_names), key=lambda n: (_rank(n), n.lower()))
+    arrows: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for i in range(len(ordered) - 1):
+        pair = (ordered[i], ordered[i + 1])
+        if pair in seen:
+            continue
+        seen.add(pair)
+        arrows.append(f"{pair[0]} ..> {pair[1]}")
+
+    if not arrows:
+        return plantuml
+
+    end_idx = plantuml.lower().rfind("@enduml")
+    if end_idx < 0:
+        return plantuml
+    prefix = plantuml[:end_idx].rstrip()
+    suffix = plantuml[end_idx:]
+    return f"{prefix}\n\n' Auto-added class relations\n" + "\n".join(arrows) + f"\n{suffix}"
+
+
+def _inject_package_arrows_if_missing(plantuml: str) -> str:
+    # Keep model output if package arrows already exist.
+    if re.search(r"(?m)^\s*\"[^\"]+\"\s*(--\|>|\.\.\|>|-->|\.\.>)\s*\"[^\"]+\"", plantuml):
+        return plantuml
+
+    package_names: list[str] = []
+    for line in plantuml.splitlines():
+        m = re.match(r'^\s*package\s+"([^"]+)"\s*(?:<<[^>]+>>)?\s*\{\s*$', line)
+        if m:
+            package_names.append(m.group(1).strip())
+
+    if len(package_names) < 2:
+        return plantuml
+
+    def _rank(pkg: str) -> int:
+        p = pkg.lower()
+        if any(k in p for k in ("controller", "resource", "endpoint", "handler", "api")):
+            return 10
+        if any(k in p for k in ("service", "manager", "facade", "usecase", "interactor")):
+            return 20
+        if any(k in p for k in ("repository", "repo", "dao", "store")):
+            return 30
+        if any(k in p for k in ("database", "db")):
+            return 40
+        if any(k in p for k in ("security", "auth", "crypto")):
+            return 45
+        if any(k in p for k in ("model", "entity", "dto", "domain")):
+            return 50
+        if any(k in p for k in ("util", "helper", "config", "misc")):
+            return 60
+        return 55
+
+    ordered = sorted(dict.fromkeys(package_names), key=lambda p: (_rank(p), p.lower()))
+    arrows: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for i in range(len(ordered) - 1):
+        src_pkg = ordered[i]
+        for dst_pkg in ordered[i + 1:i + 3]:
+            pair = (src_pkg, dst_pkg)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            arrows.append(f'"{src_pkg}" ..> "{dst_pkg}" : depends')
+
+    if not arrows:
+        return plantuml
+
+    end_idx = plantuml.lower().rfind("@enduml")
+    if end_idx < 0:
+        return plantuml
+    prefix = plantuml[:end_idx].rstrip()
+    suffix = plantuml[end_idx:]
+    return f"{prefix}\n\n' Auto-added package dependencies\n" + "\n".join(arrows) + f"\n{suffix}"
+
+
+def _inject_component_arrows_if_missing(plantuml: str) -> str:
+    # Preserve model output if it already has dependency arrows.
+    if re.search(r"(?m)^\s*\w[\w.]*\s*-->\s*\w[\w.]*\s*:\s*\w+", plantuml):
+        return plantuml
+
+    lines = plantuml.splitlines()
+
+    comp_alias_by_name: dict = {}
+    interface_alias_by_name: dict = {}
+    pkg_by_name: dict = {}
+
+    pkg_stack: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        pkg_open = re.match(r'^package\s+"([^"]+)"(?:\s+<<[^>]+>>)?\s*\{$', stripped)
+        if pkg_open:
+            pkg_stack.append(pkg_open.group(1).strip())
+            continue
+        if stripped == "}" and pkg_stack:
+            pkg_stack.pop()
+            continue
+
+        comp_m = re.search(r'\[([^\]]+)\]\s+as\s+(\w+)', stripped)
+        if comp_m:
+            name = comp_m.group(1).strip()
+            comp_alias_by_name[name] = comp_m.group(2).strip()
+            pkg_by_name[name] = pkg_stack[-1] if pkg_stack else "(root)"
+            continue
+
+        iface_m = re.search(r'\(\)\s+"([^"]+)"\s+as\s+(\w+)', stripped)
+        if iface_m:
+            interface_alias_by_name[iface_m.group(1).strip()] = iface_m.group(2).strip()
+
+    if len(comp_alias_by_name) < 2:
+        return plantuml
+
+    def _rank(name: str, pkg: str) -> int:
+        t = f"{name} {pkg}".lower()
+        if any(k in t for k in ("controller", "resource", "endpoint", "handler", "api")):
+            return 10
+        if any(k in t for k in ("service", "manager", "facade", "usecase", "interactor")):
+            return 20
+        if any(k in t for k in ("repository", "repo", "dao", "store")):
+            return 30
+        if any(k in t for k in ("database", " db", ".db")):
+            return 40
+        if any(k in t for k in ("model", "entity", "dto", "domain")):
+            return 50
+        if any(k in t for k in ("security", "auth", "hasher", "token", "crypto")):
+            return 25
+        if any(k in t for k in ("util", "helper", "config")):
+            return 60
+        return 55
+
+    def _label(dst_name: str, dst_pkg: str) -> str:
+        x = f"{dst_name} {dst_pkg}".lower()
+        if "database" in x or " db" in x:
+            return "queries"
+        if any(k in x for k in ("repository", "repo", "dao", "store")):
+            return "delegates"
+        if any(k in x for k in ("model", "entity", "dto", "domain")):
+            return "maps"
+        return "uses"
+
+    names = sorted(comp_alias_by_name.keys(), key=lambda n: (_rank(n, pkg_by_name.get(n, "")), n.lower()))
+    arrows: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    for i in range(len(names) - 1):
+        src_name = names[i]
+        dst_name = names[i + 1]
+        src_alias = comp_alias_by_name[src_name]
+        dst_alias = interface_alias_by_name.get(dst_name, comp_alias_by_name[dst_name])
+        pair = (src_alias, dst_alias)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        arrows.append(f"{src_alias} --> {dst_alias} : {_label(dst_name, pkg_by_name.get(dst_name, ''))}")
+
+    if not arrows:
+        return plantuml
+
+    end_idx = plantuml.lower().rfind("@enduml")
+    if end_idx < 0:
+        return plantuml
+
+    prefix = plantuml[:end_idx].rstrip()
+    suffix = plantuml[end_idx:]
+    return f"{prefix}\n\n' Auto-added dependency arrows\n" + "\n".join(arrows) + f"\n{suffix}"
 
 
 # =============================================================================
@@ -1049,6 +1345,7 @@ def _post_process(plantuml: str, diagram_type: str, known_fqns: list = None) -> 
             plantuml = _inject_after_startuml(plantuml, ["skinparam classAttributeIconSize 0"])
         if "namespaceSeparator" not in plantuml:
             plantuml = _inject_after_startuml(plantuml, ["set namespaceSeparator ."])
+        plantuml = _inject_class_arrows_if_missing(plantuml)
 
     elif dt == "package":
         needed = []
@@ -1061,6 +1358,8 @@ def _post_process(plantuml: str, diagram_type: str, known_fqns: list = None) -> 
         if needed:
             plantuml = _inject_after_startuml(plantuml, needed)
         plantuml = _flatten_package_diagram(plantuml, known_fqns=known_fqns)
+        plantuml = _wrap_single_file_package_diagram(plantuml, known_fqns=known_fqns)
+        plantuml = _inject_package_arrows_if_missing(plantuml)
 
     elif dt == "sequence":
         needed = []
@@ -1088,6 +1387,7 @@ def _post_process(plantuml: str, diagram_type: str, known_fqns: list = None) -> 
         if needed:
             plantuml = _inject_after_startuml(plantuml, needed)
         plantuml = _fix_component_assembly_connectors(plantuml)
+        plantuml = _inject_component_arrows_if_missing(plantuml)
 
     elif dt == "activity":
         needed = []

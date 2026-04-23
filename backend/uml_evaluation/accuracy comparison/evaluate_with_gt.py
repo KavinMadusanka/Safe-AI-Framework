@@ -37,6 +37,18 @@ GT_FILES = {
     "10": "ground_truth_10",
     "11": "ground_truth_11",
     "12": "ground_truth_12",
+    "13": "ground_truth_13",
+    # ── New samples ───────────────────────────────────────────────────────
+    "14": "ground_truth_14",   # Java  — Online Banking System
+    "15": "ground_truth_15",   # Java  — Inventory Management
+    "16": "ground_truth_16",   # Python — Task Management
+    "17": "ground_truth_17",   # Python — Vehicle Fleet
+    "18": "ground_truth_18",   # Python — Hotel Booking (association-heavy)
+    "19": "ground_truth_19",   # JS    — Blog Platform
+    "20": "ground_truth_20",   # JS    — Chat Application (association-heavy)
+    "21": "ground_truth_21",   # JS    — Online Exam System
+    "22": "ground_truth_22",   # JS    — Food Delivery (association-heavy)
+    "23": "ground_truth_23",   # JS    — Event Management
 }
 
 
@@ -502,8 +514,8 @@ def print_summary(all_results, diagram_types):
 
         if rf is not None and af is not None:
             gap = round(rf - af, 1)
-            if   gap >  5: winner = "Regex "
-            elif gap < -5: winner = "AI "
+            if   gap >  5: winner = "Regex ✅"
+            elif gap < -5: winner = "AI ✅"
             else:          winner = "≈ Tie"
         else:
             winner = "N/A"
@@ -549,7 +561,7 @@ def print_summary(all_results, diagram_types):
 
 def load_samples(filter_prefix=None):
     samples = []
-    for lang, ext in [("java",".java"),("python",".py")]:
+    for lang, ext in [("java",".java"),("python",".py"),("javascript",".js")]:
         folder = os.path.join(SAMPLES_DIR, lang)
         if not os.path.exists(folder): continue
         for fname in sorted(os.listdir(folder)):
