@@ -4,6 +4,77 @@ from typing import Dict, Any, List, Tuple
 from cir.model import TypeDecl, Field, Method, Parameter
 from cir.graph import CIRGraph
 
+# ---------------------------------------------------------------------------
+# bare-method → synthetic class wrapper
+# ---------------------------------------------------------------------------
+import re as _re_wrap
+
+
+def _has_class_declaration(code: str) -> bool:
+    """Quick check: does the code contain a class/interface/enum declaration?"""
+    return bool(_re_wrap.search(
+        r'^\s*(?:public\s+|private\s+|protected\s+|abstract\s+|final\s+)*'
+        r'(?:class|interface|enum)\s+\w+',
+        code, _re_wrap.MULTILINE,
+    ))
+
+
+def _stem_to_class_name_java(source_file: str | None, fallback: str = "Snippet") -> str:
+    if not source_file:
+        return fallback
+    import os as _os
+    stem = _os.path.splitext(_os.path.basename(source_file))[0]
+    parts = _re_wrap.sub(r"[-_]", " ", stem)
+    parts = _re_wrap.sub(r"([a-z])([A-Z])", r"\1 \2", parts)
+    name = "".join(w.capitalize() for w in parts.split())
+    return name if name else fallback
+
+
+def wrap_bare_methods_as_class(
+    code: str,
+    source_file: str | None = None,
+) -> str:
+    """
+    FIX v2: If code has no class declaration but contains method-like patterns,
+    wrap the snippet in a synthetic public class so javalang can parse it.
+    Returns code unchanged if it already has a class declaration.
+    """
+    if _has_class_declaration(code):
+        return code
+
+    has_methods = bool(_re_wrap.search(
+        r'(?:public|private|protected|static|void|int|String|boolean|double|float|long)'
+        r'\s+\w+\s*\(',
+        code,
+    ))
+    if not has_methods:
+        return code
+
+    class_name = _stem_to_class_name_java(source_file, fallback="Snippet")
+
+    lines = code.splitlines()
+    header: List[str] = []
+    body: List[str] = []
+    in_body = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_body and (
+            stripped.startswith("package ")
+            or stripped.startswith("import ")
+            or stripped == ""
+        ):
+            header.append(line)
+        else:
+            in_body = True
+            body.append(line)
+
+    indented = "\n".join("    " + l for l in body)
+    header_str = "\n".join(header)
+    if header_str:
+        header_str += "\n\n"
+    return f"{header_str}public class {class_name} {{\n{indented}\n}}"
+
+
 class JavaAdapter:
     """
     Java → CIRGraph builder.
@@ -199,6 +270,7 @@ class JavaAdapter:
         """
         Single-compilation-unit helper (for /parse).
         """
+        code = wrap_bare_methods_as_class(code, source_file=filename)  # FIX v2
         graph = CIRGraph()
         type_nodes: Dict[str, str] = {}
         units: List[Dict[str, Any]] = []
@@ -222,6 +294,7 @@ class JavaAdapter:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     code = f.read()
+                code = wrap_bare_methods_as_class(code, source_file=path)  # FIX v2
                 self._process_compilation_unit(code, graph, type_nodes, units, source_file=path)
             except ValueError as e:
                 errors.append({"file": path, "error": str(e)})

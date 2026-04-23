@@ -16,6 +16,7 @@ Diagram types: class, package, sequence, component, activity
 from __future__ import annotations
 
 import datetime
+import os
 import tempfile
 import time
 from typing import Dict, Any, List, Optional
@@ -511,7 +512,23 @@ def run_uml_pipeline_over_blob(code_blob: str) -> Dict[str, Any]:
                 f"{_elapsed(t0)}")
 
             if not rel_to_abs:
-                return _error_result("No files could be materialised from LLM output.")
+                # FIX: bare snippet with no file fences — treat the whole blob
+                # as a single file and detect its language to pick a filename.
+                _warn("No fenced files found — treating blob as a bare code snippet")
+                from detect import detect_language as _detect_lang # type: ignore
+                _lang_guess, _conf, _reason = _detect_lang(code_blob)
+                _ext_map = {
+                    "java": ".java", "python": ".py",
+                    "javascript": ".js", "typescript": ".ts",
+                }
+                _ext = _ext_map.get(_lang_guess, ".py")
+                _fname = f"snippet{_ext}"
+                _snippet_path = os.path.join(td, _fname)
+                with open(_snippet_path, "w", encoding="utf-8") as _fh:
+                    _fh.write(code_blob)
+                rel_to_abs = {_fname: _snippet_path}
+                _ok(f"Treating blob as single {_lang_guess or 'unknown'} snippet",
+                    f"saved as {_fname}")
 
             _file_tree(sorted(rel_to_abs.keys()))
 
@@ -549,12 +566,67 @@ def run_uml_pipeline_over_blob(code_blob: str) -> Dict[str, Any]:
             )
 
             if not supported_files:
+                # FIX: language grouping failed (no known extension on files).
+                # Re-detect language on the raw content and treat all files as that lang.
                 detected_str = ", ".join(langs) or "unknown"
-                return _error_result(
-                    f"No supported language files found "
-                    f"(detected: {detected_str}; supported: {sorted(_SUPPORTED_LANGUAGES)}).",
-                    file_count=len(rel_to_abs),
+                _warn(
+                    "No supported language files found by extension — re-detecting by content",
+                    f"detected: {detected_str}"
                 )
+                from detect import detect_language as _detect_lang2 # type: ignore
+                _redet_lang = None
+                for _rel2, _abs2 in rel_to_abs.items():
+                    try:
+                        with open(_abs2, "r", encoding="utf-8") as _ff:
+                            _src = _ff.read()
+                        _rl, _rc, _ = _detect_lang2(_src)
+                        if _rl in _SUPPORTED_LANGUAGES:
+                            _redet_lang = _rl
+                            break
+                    except Exception:
+                        pass
+
+                if _redet_lang:
+                    _ext_map2 = {
+                        "java": ".java", "python": ".py",
+                        "javascript": ".js", "typescript": ".ts",
+                    }
+                    _new_rel: Dict[str, str] = {}
+                    for _rel2, _abs2 in rel_to_abs.items():
+                        _new_rel2 = _rel2 if any(
+                            _rel2.endswith(e) for e in _EXT_TO_LANG
+                        ) else _rel2 + _ext_map2[_redet_lang]
+                        # rename the file on disk too
+                        import shutil as _shutil
+                        _new_abs2 = _abs2 + _ext_map2[_redet_lang] if not any(
+                            _abs2.endswith(e) for e in _EXT_TO_LANG
+                        ) else _abs2
+                        if _new_abs2 != _abs2:
+                            _shutil.copy2(_abs2, _new_abs2)
+                        _new_rel[_new_rel2] = _new_abs2
+
+                    # Redo grouping with renamed files
+                    lang_files = {}
+                    for _r, _a in _new_rel.items():
+                        _rl = _r.lower()
+                        for _ext, _lname in _EXT_TO_LANG.items():
+                            if _rl.endswith(_ext):
+                                lang_files.setdefault(_lname, {})[_r] = _a
+                                break
+
+                    supported_files = {
+                        lang: files
+                        for lang, files in lang_files.items()
+                        if lang in _SUPPORTED_LANGUAGES and files
+                    }
+                    _ok(f"Re-detected as {_redet_lang}", f"{len(supported_files)} language group(s)")
+
+                if not supported_files:
+                    return _error_result(
+                        f"No supported language files found "
+                        f"(detected: {detected_str}; supported: {sorted(_SUPPORTED_LANGUAGES)}).",
+                        file_count=len(rel_to_abs),
+                    )
 
             for lang_name, files in supported_files.items():
                 _sub(

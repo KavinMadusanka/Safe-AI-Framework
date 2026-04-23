@@ -233,6 +233,62 @@ def _is_infrastructure_noise(name: str, package: str) -> bool:
     return False
 
 
+_ENTRY_NAME_SUFFIXES: Tuple[str, ...] = (
+    "main",
+    "application",
+    "bootstrap",
+    "app",
+    "demo",
+    "example",
+    "sample",
+    "runner",
+    "cli",
+    "program",
+)
+
+
+def _is_entry_or_demo_type(name: str) -> bool:
+    nm = (name or "").lower().strip()
+    return any(nm.endswith(sfx) for sfx in _ENTRY_NAME_SUFFIXES)
+
+
+def _is_class_diagram_noise(name: str) -> bool:
+    nm = (name or "").lower().strip()
+    return nm in {"bcrypt"}
+
+
+def _has_main_like_method(methods: List[Dict[str, Any]]) -> bool:
+    for m in methods or []:
+        if _s((m or {}).get("name")).lower() == "main":
+            return True
+    return False
+
+
+def _infer_arch_package(type_name: str, kind: str = "") -> str:
+    nm = (type_name or "").lower().strip()
+    kd = (kind or "").lower().strip()
+
+    if not nm:
+        return "misc"
+    if any(k in nm for k in ("controller", "resource", "endpoint", "api", "handler")):
+        return "controller"
+    if any(k in nm for k in ("service", "manager", "facade", "interactor", "usecase", "business")):
+        return "service"
+    if any(k in nm for k in ("repository", "repo", "dao", "store")):
+        return "repository"
+    if any(k in nm for k in ("database", "db", "connection")):
+        return "database"
+    if any(k in nm for k in ("password", "hasher", "security", "auth", "crypto", "token", "encrypt")):
+        return "security"
+    if any(k in nm for k in ("model", "entity", "domain", "dto", "vo", "record", "student", "user", "account")):
+        return "model"
+    if any(k in nm for k in ("util", "helper", "common", "shared", "config")):
+        return "util"
+    if any(k in nm for k in ("main", "application", "bootstrap", "app", "demo", "example", "sample", "runner", "cli", "program")) or "main" in kd:
+        return "misc"
+    return "misc"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Model / POJO detection
 # ─────────────────────────────────────────────────────────────────────────────
@@ -271,23 +327,105 @@ def _is_pure_model(name: str, pkg: str, methods: List[Dict[str, Any]]) -> bool:
 def _summarize_package(
     type_info: Dict[str, Any],
     type_names: Dict[str, str],
+    nodes_by_id: Dict[str, Any],
+    outgoing: DefaultDict[str, List[Tuple[str, str]]],
     edges: List[Dict[str, Any]],
 ) -> str:
     from collections import defaultdict as _dd
     lines = ["PACKAGE DIAGRAM CONTEXT", ""]
 
-    pkg_to_types: Dict[str, list] = _dd(list)
+    explicit_packages = sorted({
+        _get(tnode, "package", default="(default)").strip()
+        for tnode in type_info.values()
+        if _get(tnode, "package", default="(default)").strip() not in ("", "(default)")
+    })
+    single_explicit_root = explicit_packages[0] if len(explicit_packages) == 1 else ""
+
+    has_explicit_package = any(
+        _get(tnode, "package", default="").strip() not in ("", "(default)")
+        for tnode in type_info.values()
+    )
+
+    fields_by_type: Dict[str, List[Dict[str, Any]]] = _dd(list)
+    methods_by_type: Dict[str, List[Dict[str, Any]]] = _dd(list)
+    params_by_method: Dict[str, List[Dict[str, Any]]] = _dd(list)
+
+    for type_id in type_info:
+        for etype, member_id in outgoing.get(type_id, []):
+            member = nodes_by_id.get(member_id)
+            if not member:
+                continue
+            attrs = dict(member.get("attrs", {}))
+            attrs["_id"] = member_id
+            if etype == "HAS_FIELD":
+                fields_by_type[type_id].append(attrs)
+            elif etype == "HAS_METHOD":
+                methods_by_type[type_id].append(attrs)
+
+    for node_id, node in nodes_by_id.items():
+        if node.get("kind") != "Parameter":
+            continue
+        for etype, dst in outgoing.get(node_id, []):
+            if etype == "PARAM_OF":
+                params_by_method[dst].append(node.get("attrs", {}))
+
+    package_by_type: Dict[str, str] = {}
+    pkg_to_types: Dict[str, List[Tuple[str, str]]] = _dd(list)
+
+    def _is_synthetic_root(pkg: str) -> bool:
+        p = (pkg or "").strip()
+        if not p:
+            return False
+        pl = p.lower()
+        if pl in {"main", "__main__", "snippet", "module", "script", "app"}:
+            return True
+        if "." in p:
+            return False
+        return p[:1].isupper()
+
     for type_id, tnode in type_info.items():
         tname = type_names[type_id]
-        pkg   = _get(tnode, "package", default="(default)")
         attrs = tnode.get("attrs") or tnode
-        kind  = (attrs.get("kind") or "class").lower()
+        kind = (attrs.get("kind") or "class").lower()
+        has_main_like = _has_main_like_method(methods_by_type.get(type_id, []))
+
+        if _is_class_diagram_noise(tname):
+            continue
+
+        raw_pkg = _get(tnode, "package", default="(default)")
+        inferred_pkg = "application" if has_main_like else _infer_arch_package(tname, kind)
+
+        if single_explicit_root and _is_synthetic_root(single_explicit_root):
+            pkg = inferred_pkg
+        elif has_explicit_package and raw_pkg not in ("", "(default)"):
+            pkg = raw_pkg
+        else:
+            pkg = inferred_pkg
+
+        if pkg == "misc" and has_explicit_package and not single_explicit_root:
+            pkg = raw_pkg if raw_pkg not in ("", "(default)") else "misc"
+
+        package_by_type[type_id] = pkg
         pkg_to_types[pkg].append((tname, kind))
 
-    lines.append("PACKAGES (full FQN label, type keyword + name only, NO bodies, NO brackets):")
+    lines.append("PACKAGES (synthetic packages are inferred from class roles when the file has no package declarations):")
     lines.append("")
-    for pkg in sorted(pkg_to_types.keys()):
-        label = "(default)" if pkg == "(default)" else pkg
+
+    def _pkg_sort(pkg: str) -> Tuple[int, str]:
+        order = {
+            "controller": 10,
+            "service": 20,
+            "repository": 30,
+            "database": 40,
+            "security": 50,
+            "model": 60,
+            "util": 70,
+            "misc": 90,
+        }
+        return (order.get(pkg, 80), pkg)
+
+    for pkg in sorted(pkg_to_types.keys(), key=_pkg_sort):
+        label = pkg or "misc"
         lines.append(f'package "{label}" {{')
         for tname, kind in sorted(pkg_to_types[pkg], key=lambda x: x[0]):
             if kind == "interface":
@@ -301,31 +439,91 @@ def _summarize_package(
         lines.append("}")
         lines.append("")
 
-    lines.append("RELATIONSHIP ARROWS (ALL go after all package blocks, never inside):")
-    lines.append("  --|>  inheritance    ..|>  implementation    -->  association    ..>  dependency")
-    lines.append("")
+    type_ids_by_short_name: Dict[str, List[str]] = {}
+    for tid, tname in type_names.items():
+        if tid not in package_by_type:
+            continue
+        key = _clean_type_short(tname).lower() or tname.lower()
+        type_ids_by_short_name.setdefault(key, []).append(tid)
 
-    seen: set = set()
-    type_name_map = {tid: type_names[tid] for tid in type_info}
+    def _resolve_target_type_id(raw_type: str, src_type_id: str) -> Optional[str]:
+        short = _clean_type_short(raw_type).lower()
+        if not short:
+            return None
+
+        candidates = type_ids_by_short_name.get(short, [])
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        src_pkg = package_by_type.get(src_type_id)
+        same_pkg = [tid for tid in candidates if package_by_type.get(tid) == src_pkg]
+        if len(same_pkg) == 1:
+            return same_pkg[0]
+
+        return sorted(candidates)[0]
+
+    package_dependency_pairs: Set[Tuple[str, str]] = set()
+
+    def _add_dependency(src_type_id: str, dst_type_id: str) -> None:
+        src_pkg = package_by_type.get(src_type_id)
+        dst_pkg = package_by_type.get(dst_type_id)
+        if not src_pkg or not dst_pkg or src_pkg == dst_pkg:
+            return
+        package_dependency_pairs.add((src_pkg, dst_pkg))
+
     for e in edges:
         etype = _s(e.get("type"))
         src   = _s(e.get("src"))
         dst   = _s(e.get("dst"))
-        if src not in type_info or dst not in type_info:
+        if src not in package_by_type or dst not in package_by_type:
             continue
-        sn, dn = type_name_map[src], type_name_map[dst]
-        key = (sn, dn, etype)
-        if key in seen:
-            continue
-        seen.add(key)
-        if etype == "INHERITS":
-            lines.append(f"{sn} --|> {dn}")
-        elif etype == "IMPLEMENTS":
-            lines.append(f"{sn} ..|> {dn}")
-        elif etype == "ASSOCIATES":
-            lines.append(f"{sn} --> {dn}")
-        elif etype == "DEPENDS_ON":
-            lines.append(f"{sn} ..> {dn}")
+        if etype in ("ASSOCIATES", "DEPENDS_ON", "INHERITS", "IMPLEMENTS"):
+            _add_dependency(src, dst)
+
+    for src_type_id in package_by_type.keys():
+        for field in fields_by_type.get(src_type_id, []):
+            raw_t = str(field.get("raw_type") or field.get("type_name") or "")
+            dst_type_id = _resolve_target_type_id(raw_t, src_type_id)
+            if dst_type_id and dst_type_id != src_type_id:
+                _add_dependency(src_type_id, dst_type_id)
+
+        for method in methods_by_type.get(src_type_id, []):
+            raw_ret = str(method.get("raw_return_type") or method.get("return_type") or "")
+            dst_type_id = _resolve_target_type_id(raw_ret, src_type_id)
+            if dst_type_id and dst_type_id != src_type_id:
+                _add_dependency(src_type_id, dst_type_id)
+
+            method_id = method.get("_id")
+            if not method_id:
+                continue
+            for param in params_by_method.get(method_id, []):
+                raw_p = str(param.get("raw_type") or param.get("type_name") or "")
+                dst_type_id = _resolve_target_type_id(raw_p, src_type_id)
+                if dst_type_id and dst_type_id != src_type_id:
+                    _add_dependency(src_type_id, dst_type_id)
+
+    # JS adapters may not emit explicit type dependencies. When empty, synthesize
+    # package-level dependencies from architectural ordering of discovered packages.
+    if not package_dependency_pairs and package_by_type:
+        package_order = sorted(
+            set(package_by_type.values()),
+            key=lambda pkg: ( _layer_order("", pkg), pkg ),
+        )
+        for i in range(len(package_order) - 1):
+            src_pkg = package_order[i]
+            # Connect each package to up to 2 downstream packages to avoid overly sparse output.
+            for dst_pkg in package_order[i + 1:i + 3]:
+                if src_pkg != dst_pkg:
+                    package_dependency_pairs.add((src_pkg, dst_pkg))
+
+    lines.append("PACKAGE-LEVEL ARROWS (ALL go after all package blocks, never inside):")
+    lines.append("  packageA ..> packageB : depends")
+    lines.append("")
+
+    for src_pkg, dst_pkg in sorted(package_dependency_pairs):
+        lines.append(f'"{src_pkg}" ..> "{dst_pkg}" : depends')
 
     return "\n".join(lines)
 
@@ -377,24 +575,96 @@ def _summarize_component(
     def _ialias(tid: str) -> str:
         return "I_t_" + _re.sub(r"[^a-zA-Z0-9]", "_", type_names.get(tid, tid))
 
+    explicit_pkgs = sorted({
+        _get(t, "package", default="(default)")
+        for t in type_info.values()
+        if _get(t, "package", default="(default)") not in ("", "(default)")
+    })
+    single_explicit_root = explicit_pkgs[0] if len(explicit_pkgs) == 1 else ""
+
+    effective_pkg_by_tid: Dict[str, str] = {}
+    for tid in type_info:
+        nm = type_names.get(tid, tid)
+        if _is_entry_or_demo_type(nm):
+            continue
+        raw_pkg = _get(type_info[tid], "package", default="(default)")
+        kind = _get(type_info[tid], "kind", default="class")
+
+        if single_explicit_root:
+            inferred = _infer_arch_package(nm, kind)
+            effective_pkg_by_tid[tid] = (
+                single_explicit_root if inferred == "misc" else f"{single_explicit_root}.{inferred}"
+            )
+        else:
+            effective_pkg_by_tid[tid] = raw_pkg
+
     called: set = set()
     dep_edges = []
     for e in edges:
         etype = _s(e.get("type"))
         src   = _s(e.get("src"))
         dst   = _s(e.get("dst"))
-        if src in type_info and dst in type_info and src != dst:
+        if src in effective_pkg_by_tid and dst in effective_pkg_by_tid and src != dst:
+            if _is_entry_or_demo_type(type_names.get(src, src)) or _is_entry_or_demo_type(type_names.get(dst, dst)):
+                continue
             if etype in ("ASSOCIATES", "DEPENDS_ON"):
-                dep_edges.append((src, dst))
+                dep_edges.append((src, dst, etype))
                 called.add(dst)
 
+    # JS adapters can miss ASSOCIATES/DEPENDS_ON edges for single-file code.
+    # If no explicit dependencies exist, synthesize a lightweight architectural
+    # flow so component diagrams still include meaningful arrows.
+    if not dep_edges:
+        ordered_tids = sorted(
+            effective_pkg_by_tid.keys(),
+            key=lambda tid: (
+                _layer_order(type_names.get(tid, ""), effective_pkg_by_tid.get(tid, "")),
+                type_names.get(tid, tid),
+            ),
+        )
+
+        grouped: Dict[str, List[str]] = _dd(list)
+        for tid in ordered_tids:
+            grouped[effective_pkg_by_tid.get(tid, "(default)")].append(tid)
+
+        ordered_pkgs = sorted(
+            grouped.keys(),
+            key=lambda pkg: _layer_order("", pkg),
+        )
+
+        for i, src_pkg in enumerate(ordered_pkgs):
+            src_members = grouped.get(src_pkg, [])
+            if not src_members:
+                continue
+
+            # Prefer service/controller-like source for clearer architecture flow.
+            src_tid = min(
+                src_members,
+                key=lambda tid: _layer_order(type_names.get(tid, ""), effective_pkg_by_tid.get(tid, "")),
+            )
+
+            # Connect to next 1-2 downstream architectural packages.
+            downstream = ordered_pkgs[i + 1:i + 3]
+            for dst_pkg in downstream:
+                dst_members = grouped.get(dst_pkg, [])
+                if not dst_members:
+                    continue
+                dst_tid = min(
+                    dst_members,
+                    key=lambda tid: _layer_order(type_names.get(tid, ""), effective_pkg_by_tid.get(tid, "")),
+                )
+                if src_tid != dst_tid:
+                    dep_edges.append((src_tid, dst_tid, "SYNTH"))
+                    called.add(dst_tid)
+
     all_pkgs = list({
-        _get(t, "package", default="(default)")
-        for t in type_info.values()
-        if _get(t, "package", default="(default)") != "(default)"
+        pkg for pkg in effective_pkg_by_tid.values()
+        if pkg not in ("", "(default)")
     })
     root = ""
-    if len(all_pkgs) > 1:
+    if single_explicit_root:
+        root = single_explicit_root
+    elif len(all_pkgs) > 1:
         parts = [p.split(".") for p in all_pkgs]
         common = []
         for segs in zip(*parts):
@@ -413,12 +683,13 @@ def _summarize_component(
         return pkg.rsplit(".", 1)[-1]
 
     pkg_to_tids: Dict[str, list] = _dd(list)
-    for tid in type_info:
-        pkg = _get(type_info[tid], "package", default="(default)")
+    for tid, pkg in effective_pkg_by_tid.items():
         pkg_to_tids[pkg].append(tid)
 
     lines = ["COMPONENT DIAGRAM CONTEXT", ""]
     lines.append(f"ROOT PACKAGE (full FQN): {root or '(default)'}")
+    if single_explicit_root:
+        lines.append("SINGLE-FILE MODE: infer architectural sub-packages (service/repository/database/security/model/util).")
     lines.append("")
     lines.append("COMPONENTS — each class becomes [ClassName] as alias:")
     lines.append("  - Components depended-on by others get a lollipop: () 'ClassName' as I_alias + alias - I_alias")
@@ -454,16 +725,28 @@ def _summarize_component(
         lines.append("}")
         lines.append("")
 
+    # Keep only the strongest real dependency per source-target pair.
+    # Preference: DEPENDS_ON over ASSOCIATES, and non-generic labels over "uses".
+    best_edges: Dict[Tuple[str, str], Tuple[int, str]] = {}
+    for src, dst, etype in dep_edges:
+        dst_pkg  = effective_pkg_by_tid.get(dst, _get(type_info[dst], "package", default=""))
+        dst_name = type_names[dst]
+        label = _arrow_label(dst_pkg, dst_name)
+        label_score = 0 if label == "uses" else 1
+        edge_score = (2 if etype == "DEPENDS_ON" else 1) * 10 + label_score
+        pair = (src, dst)
+        prev = best_edges.get(pair)
+        if prev is None or edge_score > prev[0]:
+            best_edges[pair] = (edge_score, label)
+
     lines.append("DEPENDENCY ARROWS (after closing root package }, target lollipop alias I_alias):")
     seen: set = set()
-    for src, dst in dep_edges:
+    for src, dst in sorted(best_edges.keys(), key=lambda p: (_alias(p[0]), _alias(p[1]))):
         pair = (_alias(src), _ialias(dst) if dst in called else _alias(dst))
         if pair in seen:
             continue
         seen.add(pair)
-        dst_pkg  = _get(type_info[dst], "package", default="")
-        dst_name = type_names[dst]
-        label = _arrow_label(dst_pkg, dst_name)
+        label = best_edges[(src, dst)][1]
         lines.append(f"{_alias(src)} --> {_ialias(dst) if dst in called else _alias(dst)} : {label}")
 
     return "\n".join(lines)
@@ -532,6 +815,11 @@ def _summarize_activity(
         calls_raw.append({"src": src_m, "dst": dst_m, "order": order})
 
     calls_raw.sort(key=lambda x: x.get("order", 0))
+    calls_by_src_raw: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for c in calls_raw:
+        calls_by_src_raw[c["src"]].append(c)
+    for src_m in calls_by_src_raw:
+        calls_by_src_raw[src_m].sort(key=lambda x: x.get("order", 0))
 
     # ── Exclusion: pure model types AND infrastructure noise ───────────────
     #
@@ -755,12 +1043,88 @@ def _summarize_activity(
         lines.append(f"  [{nm}]  lane={lane}  package={pkg}")
     lines.append("")
 
+    entrypoint_types: List[str] = []
+    service_like_types: List[str] = []
+    for tid in sorted_tids:
+        name = _get(type_info[tid], "name", default=tid)
+        lane = _participant_lane(tid)
+        if _is_entry_or_demo_type(name):
+            entrypoint_types.append(tid)
+        if lane in ("Controller", "Service", "Repository", "Database") or "service" in name.lower():
+            service_like_types.append(tid)
+
+    if entrypoint_types:
+        lines.append("ENTRYPOINT / DEMO FLOW (show the whole app flow, not a single branch):")
+        for tid in entrypoint_types:
+            nm = _get(type_info[tid], "name", default=tid)
+            public_methods = [
+                m for m in methods_by_type.get(tid, [])
+                if not m.get("is_constructor")
+                and not _is_dunder(m.get("name", ""))
+                and m.get("visibility", "public") != "private"
+            ]
+            lines.append(f"  [{nm}] entrypoint")
+            for m in public_methods[:6]:
+                mid = m.get("_id", "")
+                mname = m.get("name", "method")
+                params = _fmt_params(mid)
+                ret = _fmt_return(mid)
+                hint = "[ACTION]"
+                if _is_list_return(mid):
+                    hint = "[LOOP] → iterate over returned items / collections"
+                elif _is_guard(mid):
+                    hint = f'[GUARD] → if ({_guard_label(mid)}) then (yes) ... else (no) ... endif'
+                lines.append(f"    - {nm}.{mname}({params}) : {ret} {hint}")
+
+            for call in calls_by_src_raw.get(next((m.get("_id", "") for m in public_methods if (m.get("name") or "").lower() == "main"), ""), []):
+                dst_mid = call.get("dst")
+                dst_owner = method_owner.get(dst_mid, "")
+                dst_type = _get(type_info.get(dst_owner, {}), "name", default=dst_owner)
+                dst_m = method_attrs.get(dst_mid, {})
+                dst_name = dst_m.get("name", "method")
+                lines.append(f"    -> calls {dst_type}.{dst_name}()")
+        lines.append("")
+
+    if service_like_types:
+        lines.append("MAJOR SERVICE OPERATIONS (use these as the backbone of the activity):")
+        for tid in service_like_types:
+            nm = _get(type_info[tid], "name", default=tid)
+            public_methods = [
+                m for m in methods_by_type.get(tid, [])
+                if not m.get("is_constructor")
+                and not _is_dunder(m.get("name", ""))
+                and m.get("visibility", "public") != "private"
+            ]
+            if not public_methods:
+                continue
+            lines.append(f"  [{nm}]")
+            for m in public_methods[:8]:
+                mid = m.get("_id", "")
+                mname = m.get("name", "method")
+                params = _fmt_params(mid)
+                ret = _fmt_return(mid)
+                hint = "[ACTION]"
+                if _is_list_return(mid):
+                    hint = "[LOOP]"
+                elif _is_guard(mid):
+                    hint = f"[GUARD: if ({_guard_label(mid)}) then ...]"
+                lines.append(f"    - {mname}({params}) : {ret} {hint}")
+                for call in calls_by_src_raw.get(mid, []):
+                    dst_mid = call.get("dst")
+                    dst_owner = method_owner.get(dst_mid, "")
+                    dst_type = _get(type_info.get(dst_owner, {}), "name", default=dst_owner)
+                    dst_m = method_attrs.get(dst_mid, {})
+                    dst_name = dst_m.get("name", "method")
+                    lines.append(f"      -> calls {dst_type}.{dst_name}()")
+            lines.append("")
+
     if ordered_calls:
-        lines.append("ORDERED METHOD CALL CHAIN (follow this sequence for the flow):")
+        lines.append("MAJOR FLOW CANDIDATES (use all of these; do NOT stop after the first branch):")
         lines.append("  Format: CallerType → CallerMethod  calls  CalleeType.calleeMethod(params) : ReturnType")
         lines.append("  Hint:   [GUARD]  = decision diamond (if/else)    [LOOP] = repeat while    [ACTION] = plain step")
         lines.append("")
-        for i, c in enumerate(ordered_calls, 1):
+        seen_sources: List[Tuple[str, str]] = []
+        for i, c in enumerate(ordered_calls[:40], 1):
             src_t  = c["src_type"]
             dst_t  = c["dst_type"]
             src_nm = _get(type_info.get(src_t, {}), "name", default=src_t)
@@ -775,16 +1139,24 @@ def _summarize_activity(
 
             hint = "[ACTION]"
             if _is_list_return(mid):
-                hint = "[LOOP]  → use: repeat / repeat while (more items?) is (yes) -> no;"
+                hint = "[LOOP] → iterate over returned items / collections"
             elif _is_guard(mid):
                 guard_q = _guard_label(mid)
-                hint = f'[GUARD] → use: if ({guard_q}) then (yes) ... else (no) ... endif'
+                hint = f'[GUARD] → if ({guard_q}) then (yes) ... else (no) ... endif'
 
             lines.append(f"  {i:2}. {src_nm}.{src_mname}  →  {dst_nm}.{dst_mname}({params}) : {ret}")
             lines.append(f"       {hint}")
+            if (src_t, src_mname) not in seen_sources:
+                seen_sources.append((src_t, src_mname))
 
         lines.append("")
-        lines.append("SWIMLANE ORDER (top-to-bottom, same as call chain above):")
+        lines.append("TOP-LEVEL OPERATION ORDER (prefer a fuller workflow, not a single-method diagram):")
+        for i, (src_t, src_mname) in enumerate(seen_sources[:20], 1):
+            src_nm = _get(type_info.get(src_t, {}), "name", default=src_t)
+            lines.append(f"  {i:2}. {src_nm}.{src_mname}")
+
+        lines.append("")
+        lines.append("SWIMLANE ORDER (top-to-bottom, same as the major flow candidates above):")
         seen_lanes: List[str] = []
         for c in ordered_calls:
             lane = _participant_lane(c["dst_type"])
@@ -831,8 +1203,9 @@ def _summarize_activity(
     lines.append("  4. Use 'ClassName.methodName(params)' format in :action; labels.")
     lines.append("  5. Guards wrap calls annotated [GUARD]; loops wrap calls annotated [LOOP].")
     lines.append("  6. Follow the call chain order above for the diagram flow.")
-    lines.append("  7. Do NOT use 'lane' keyword — it does not exist in PlantUML.")
-    lines.append("  8. Do NOT emit @startuml twice.")
+    lines.append("  7. Do NOT collapse the diagram into only the first guard or first method.")
+    lines.append("  8. Do NOT use 'lane' keyword — it does not exist in PlantUML.")
+    lines.append("  9. Do NOT emit @startuml twice.")
 
     return "\n".join(lines)
 
@@ -870,7 +1243,7 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
     is_activity_diagram  = dt in ("activity", "activity diagram")
 
     if is_package_diagram:
-        return _summarize_package(type_info, type_names, edges)
+        return _summarize_package(type_info, type_names, nodes_by_id, outgoing, edges)
 
     if is_component_diagram:
         return _summarize_component(type_info, type_names, edges, outgoing, nodes_by_id)
@@ -879,8 +1252,32 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
         return _summarize_activity(type_info, type_names, nodes_by_id, edges, outgoing)
 
     # ── Class / Sequence diagrams ─────────────────────────────────────────────
+    if is_class_diagram:
+        type_ids_with_main_method: Set[str] = set()
+        for tid in type_info.keys():
+            method_nodes: List[Dict[str, Any]] = []
+            for etype, method_id in outgoing.get(tid, []):
+                if etype != "HAS_METHOD":
+                    continue
+                mn = nodes_by_id.get(method_id)
+                if not mn:
+                    continue
+                method_nodes.append(dict(mn.get("attrs", {})))
+            if _has_main_like_method(method_nodes):
+                type_ids_with_main_method.add(tid)
+
+        type_info = {
+            tid: attrs
+            for tid, attrs in type_info.items()
+            if not _is_entry_or_demo_type(type_names.get(tid, tid))
+            and tid not in type_ids_with_main_method
+            and not _is_class_diagram_noise(type_names.get(tid, tid))
+        }
+        type_names = {tid: type_names[tid] for tid in type_info}
+
     fields_by_type:  DefaultDict[str, List[str]] = defaultdict(list)
     methods_by_type: DefaultDict[str, List[str]] = defaultdict(list)
+    field_names_by_type: DefaultDict[str, Set[str]] = defaultdict(set)
 
     params_for_method: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
     if is_class_diagram:
@@ -912,6 +1309,8 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
 
                 if not fname:
                     continue
+
+                field_names_by_type[type_id].add(str(fname).strip().lower())
 
                 sym = _vis_symbol(vis)
                 mod_parts: List[str] = []
@@ -979,6 +1378,15 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
     MAX_METHODS = 18
 
     rels: List[str] = []
+    associate_pairs: Set[Tuple[str, str]] = set()
+    for e in edges:
+        if _s(e.get("type")) != "ASSOCIATES":
+            continue
+        src = _s(e.get("src"))
+        dst = _s(e.get("dst"))
+        if src in type_names and dst in type_names:
+            associate_pairs.add((src, dst))
+
     for e in edges:
         src   = _s(e.get("src"))
         dst   = _s(e.get("dst"))
@@ -987,7 +1395,52 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
             continue
         if src not in type_names or dst not in type_names:
             continue
+        if _is_entry_or_demo_type(type_names[src]) or _is_entry_or_demo_type(type_names[dst]):
+            continue
+        if _is_class_diagram_noise(type_names[src]) or _is_class_diagram_noise(type_names[dst]):
+            continue
+        if etype == "DEPENDS_ON" and (src, dst) in associate_pairs:
+            continue
         rels.append(f"- {etype}: {type_names[src]} -> {type_names[dst]}")
+
+    # JS inputs often miss explicit class-level relationships in CIR.
+    # Synthesize dependencies from collaborator-like field names when needed.
+    if is_class_diagram and not rels:
+        norm_name_by_type: Dict[str, str] = {}
+        for tid, tname in type_names.items():
+            if tid not in type_info:
+                continue
+            cleaned = re.sub(r"[^a-zA-Z0-9]", "", tname).lower()
+            if cleaned:
+                norm_name_by_type[tid] = cleaned
+
+        synthetic_pairs: Set[Tuple[str, str]] = set()
+        for src_tid in type_info.keys():
+            src_fields = field_names_by_type.get(src_tid, set())
+            if not src_fields:
+                continue
+            for dst_tid in type_info.keys():
+                if src_tid == dst_tid:
+                    continue
+                target_norm = norm_name_by_type.get(dst_tid, "")
+                if not target_norm:
+                    continue
+                if any(target_norm in fname for fname in src_fields):
+                    synthetic_pairs.add((src_tid, dst_tid))
+
+        if not synthetic_pairs:
+            ordered_types = sorted(
+                type_info.keys(),
+                key=lambda tid: (
+                    _layer_order(type_names.get(tid, ""), _get(type_info[tid], "package", default="")),
+                    type_names.get(tid, tid),
+                ),
+            )
+            for i in range(len(ordered_types) - 1):
+                synthetic_pairs.add((ordered_types[i], ordered_types[i + 1]))
+
+        for src_tid, dst_tid in sorted(synthetic_pairs, key=lambda p: (type_names.get(p[0], ""), type_names.get(p[1], ""))):
+            rels.append(f"- DEPENDS_ON: {type_names[src_tid]} -> {type_names[dst_tid]}")
 
     lines: List[str] = []
     lines.append("CIR SUMMARY")
@@ -1037,5 +1490,9 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
     lines.append("RELATIONSHIPS (etype: A -> B):")
     for r in rels[:250]:
         lines.append(r)
+
+    # gets real context even for bare snippets / single-function code.
+    if not any(l.startswith("- ") for l in lines):
+        lines.append("- (No types found in CIR — code may be a bare snippet or empty)")
 
     return "\n".join(lines)

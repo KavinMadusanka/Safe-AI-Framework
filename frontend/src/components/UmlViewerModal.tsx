@@ -351,7 +351,8 @@ export default function UmlViewerModal({
   const effectiveSource: UmlSource = source === "ai" && !hasAnyAi ? "rule" : source;
 
   const activeSvg = useMemo(() => {
-    return effectiveSource === "ai" ? aiSvgs[tab] : ruleSvgs[tab];
+    const svg = effectiveSource === "ai" ? aiSvgs[tab] : ruleSvgs[tab];
+    return svg && svg.trim().length > 0 ? svg : null;  // FIX: empty string = no diagram
   }, [effectiveSource, tab, aiSvgs, ruleSvgs]);
 
   const tabEnabled = useMemo(() => {
@@ -411,6 +412,20 @@ export default function UmlViewerModal({
     }
   };
 
+  // FIX: auto-jump to first tab that has a rendered SVG when modal opens
+  useEffect(() => {
+    if (!open) return;
+    const TYPES: DiagramType[] = ["class", "sequence", "package", "component", "activity"];
+    const firstWithSvg = TYPES.find((k) => {
+      const s = ruleSvgs[k];
+      return s && s.trim().length > 0;
+    });
+    if (firstWithSvg && !(ruleSvgs[tab] && ruleSvgs[tab]!.trim().length > 0)) {
+      setTab(firstWithSvg);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     if (source !== "ai") return;
@@ -430,7 +445,8 @@ export default function UmlViewerModal({
     }
   };
 
-  if (!open || !uml || uml.error) return null;
+  if (!open || !uml) return null;
+  // FIX: Don't bail when uml.error is set — partial results are still useful.
 
   return (
     <div
@@ -583,6 +599,20 @@ export default function UmlViewerModal({
             }}
           >
             {aiError ? aiError : `Generating AI ${tab} diagram...`}
+          </div>
+        )}
+
+        {uml.error && (
+          <div style={{
+            margin: "8px 16px 0 16px",
+            padding: "10px 14px",
+            borderRadius: 8,
+            background: "#fef2f2",
+            border: "1px solid #fecaca",
+            color: "#991b1b",
+            fontSize: 13,
+          }}>
+            ⚠ Pipeline error: {uml.error}
           </div>
         )}
 

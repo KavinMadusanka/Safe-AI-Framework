@@ -12,6 +12,7 @@ Pipeline stages:
 """
 
 from typing import Dict, Any
+import re
 
 from stages.prompt            import enhance_prompt
 from stages.prompt_firewall   import sanitize_prompt
@@ -52,10 +53,20 @@ def _c(color: str, text: str) -> str:
 
 _W = 80
 
+
+def _redact_uml_requirements_for_logs(content: str) -> str:
+    """Hide the large UML requirements block from terminal output only."""
+    pattern = re.compile(
+        r"\n\[UML DIAGRAM REQUIREMENTS\][\s\S]*?(?=\n\[RESPONSE REQUIREMENTS\])"
+    )
+    return pattern.sub(
+        "\n[UML DIAGRAM REQUIREMENTS]\n<hidden in terminal output>",
+        content,
+    )
+
 def _box_line(text: str, width: int = _W) -> str:
     padded = f"  {text}"
     # Strip ANSI codes for length calculation
-    import re
     clean = re.sub(r"\033\[[0-9;]*m", "", padded)
     pad = width - 2 - len(clean)
     return f"{C.CYAN}║{C.RESET}{padded}{' ' * max(pad, 0)}{C.CYAN}║{C.RESET}"
@@ -65,7 +76,6 @@ def _print_prompt_box(label: str, content: str) -> None:
     bar = _c(C.CYAN, "═" * (_W - 2))
     print(f"\n{C.CYAN}╔{C.RESET}{bar}{C.CYAN}╗{C.RESET}")
     lbl_line = f"  {_c(C.CYAN + C.BOLD, label)}"
-    import re
     clean = re.sub(r"\033\[[0-9;]*m", "", lbl_line)
     pad = _W - 2 - len(clean)
     print(f"{C.CYAN}║{C.RESET}{lbl_line}{' ' * max(pad, 0)}{C.CYAN}║{C.RESET}")
@@ -239,7 +249,10 @@ async def run_pipeline(prompt: str) -> Dict[str, Any]:
     policy_version  = enhanced.get("policy_version", "v1")
 
     _print_prompt_box("USER PROMPT (original)", safe_prompt)
-    _print_prompt_box("ENHANCED PROMPT (sent to LLM)", hardened_prompt)
+    _print_prompt_box(
+        "ENHANCED PROMPT (sent to LLM)",
+        _redact_uml_requirements_for_logs(hardened_prompt),
+    )
 
     print()
     _kv("Policy version",  policy_version,          C.DIM, C.CYAN)

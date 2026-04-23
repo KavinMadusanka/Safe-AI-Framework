@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException  # type: ignore
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from pydantic import BaseModel  # type: ignore
 from typing import Any, Dict
 from uml_validate import validate_plantuml
@@ -13,6 +14,19 @@ from uml_rules import (
 )
 
 app = FastAPI(title="UML Regex Generator (CIR -> PlantUML)")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class UMLRegexRequest(BaseModel):

@@ -18,11 +18,17 @@ class PlantUMLRenderer:
         """
         try:
             proc = subprocess.run(
-                ["java", "-jar", self.jar_path, "-tsvg", "-pipe"],
+                [
+                    "java",
+                    "-DPLANTUML_LIMIT_SIZE=85536",   # FIX: allow large diagrams
+                    "-jar", self.jar_path,
+                    "-tsvg",
+                    "-pipe",
+                ],
                 input=plantuml_text.encode("utf-8"),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=False,  # we'll inspect returncode ourselves
+                check=False,   # inspect returncode ourselves
             )
 
             if proc.returncode != 0:
@@ -30,9 +36,18 @@ class PlantUMLRenderer:
                 return "", f"PlantUML error (code {proc.returncode}): {err}"
 
             svg = proc.stdout.decode("utf-8", errors="ignore")
+
+            # PlantUML sometimes exits 0 but returns an error XML — detect it
+            if svg.strip().startswith("<!--") and "PlantUML" in svg and "Error" in svg:
+                return "", f"PlantUML returned an error diagram: {svg[:300]}"
+
             return svg, None
 
         except FileNotFoundError:
-            return "", "Java or plantuml.jar not found. Check JAVA installation and jar path."
+            return (
+                "",
+                "Java or plantuml.jar not found. "
+                "Ensure Java is installed and PLANTUML_JAR_PATH is correct.",
+            )
         except Exception as e:
             return "", f"Unexpected error running PlantUML: {e}"
