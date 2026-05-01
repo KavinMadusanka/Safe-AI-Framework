@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from plugin_router import router as plugins_router
 from file_router import router as file_router
+from plugin_transformer import transform_plugin_entry
 
 log = logging.getLogger("core-system")
 
@@ -225,7 +226,8 @@ def core_save(
         raise HTTPException(404, detail="No project uploaded")
     fpath = _safe_join(PROJECT_DIR, path)
     fpath.parent.mkdir(parents=True, exist_ok=True)
-    fpath.write_text(content, encoding="utf-8")
+    normalised = content.replace("\r\n", "\n").replace("\r", "\n")
+    fpath.write_text(normalised, encoding="utf-8")
     return {"ok": True, "path": path}
 
 # ==============================================================================
@@ -298,19 +300,46 @@ def create_plugin(
 ):
     dest = _safe_join(PLUGINS_DIR, path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(content, encoding="utf-8")
-
-    # ── Auto-issue certificate when plugin becomes complete ──────────
+ 
+    # ── Auto-transform entry.js to runner format ──────────────────────────
+    # Only transform files named "entry.js" (or any *.js that isn't a
+    # manifest/cert file).  manifest.json and cert/* are passed through as-is.
+    final_content = content
+    was_transformed = False
+ 
+    filename = dest.name
+    if filename.endswith(".js") and "cert" not in dest.parts:
+        try:
+            from plugin_transformer import transform_plugin_entry
+            final_content, was_transformed = transform_plugin_entry(content, filename)
+            if was_transformed:
+                log.info(
+                    "[PLUGIN/NEW] Auto-transformed '%s' from React/JSX to runner format", path
+                )
+        except Exception as exc:
+            # Non-fatal: if transformation fails, save the original and warn
+            log.warning(
+                "[PLUGIN/NEW] Transformation failed for '%s', saving original: %s", path, exc
+            )
+            final_content = content
+            was_transformed = False
+ 
+    dest.write_text(final_content, encoding="utf-8")
+ 
+    # ── Auto-issue certificate when plugin becomes complete ───────────────
     # A plugin is "complete" when its directory contains manifest.json.
-    # We issue the cert once and never again (idempotent).
     parts = Path(path).parts
     if len(parts) >= 1:
-        slug = parts[0]  # e.g. "my-plugin" from "my-plugin/manifest.json"
+        slug = parts[0]
         plugin_dir = (PLUGINS_DIR / slug).resolve()
         if (plugin_dir / "manifest.json").exists():
             _issue_and_store_plugin_cert(slug)
-
-    return {"ok": True, "path": str(dest.relative_to(PROJECT_DIR))}
+ 
+    return {
+        "ok": True,
+        "path": str(dest.relative_to(PROJECT_DIR)),
+        "transformed": was_transformed,
+    }
 
 @app.get("/core/plugins")
 def list_plugins():

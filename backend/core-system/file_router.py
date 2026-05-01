@@ -45,6 +45,9 @@ def create_file(data: dict):
 
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
+    content: str = data.get("content", "") or ""
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+
     with open(full_path, "w") as f:
         f.write("")
 

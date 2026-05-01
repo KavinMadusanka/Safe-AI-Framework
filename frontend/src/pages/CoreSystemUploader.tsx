@@ -411,7 +411,12 @@ async function onStopPlugin(name?: string) {
   }
   async function saveFile() {
     if (!openPath) return;
-    await axios.post(`${API}/core/save`, editorValue, {
+    // Normalise line-endings to LF before sending.
+    // Monaco on Windows uses CRLF (\r\n) internally; if those \r bytes
+    // reach the backend and get written to disk, every line gains an
+    // extra blank line when the file is read back.
+    const normalised = editorValue.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    await axios.post(`${API}/core/save`, normalised, {
       params: { path: openPath },
       headers: { "Content-Type": "text/plain" },
     });
@@ -429,7 +434,9 @@ async function onStopPlugin(name?: string) {
       const guessBack = cands.find((c) => /back|api|server/i.test(c)) || cands[1] || "";
       if (!dockerFrontSubdir) setDockerFrontSubdir(guessFront || "");
       if (!dockerBackSubdir) setDockerBackSubdir(guessBack || "");
-    } catch {}
+    } catch (err) {
+      console.error("Failed to load node candidates:", err);
+    }
   }
 
   function computeUrlsFromContainers(conts: ContainersMap, frontGuess: string, backGuess: string) {
@@ -623,21 +630,95 @@ async function onStopPlugin(name?: string) {
 
   // create file function
   async function createNewFile() {
-    const name = prompt("Enter file name:");
+    const name = prompt("Enter file name (e.g. Newpage.js):");
     if (!name) return;
-
+ 
     const fullPath = cwd ? `${cwd}/${name}` : name;
-
+ 
+    // Derive the component name from the filename, strip extension
+    const componentName = name.replace(/\.[^.]+$/, "");
+ 
+    // Give the template to .js / .jsx / .tsx files
+    const isJsLike = /\.(js|jsx|tsx)$/i.test(name);
+    const initialContent = isJsLike ? buildPageTemplate(componentName) : "";
+ 
     try {
-      await axios.post(`${API}/core/create-file`, {
-        path: fullPath,
-      });
-
+      // Step 1 — create the file on disk (empty or with content)
+      await axios.post(
+        `${API}/core/create-file`,
+        { path: fullPath, content: initialContent },
+      );
+ 
+      // Step 2 — if it's a JS-like file, immediately persist the template
+      //           via /core/save so it survives without a manual Save press.
+      //           We call save directly here instead of relying on saveFile()
+      //           because React state (editorValue / openPath) hasn't updated yet.
+      if (isJsLike && initialContent) {
+        const normalised = initialContent.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        await axios.post(`${API}/core/save`, normalised, {
+          params: { path: fullPath },
+          headers: { "Content-Type": "text/plain" },
+        });
+      }
+ 
+      // Step 3 — refresh the file tree and open the file in the editor
       await loadTree(cwd);
+      if (isJsLike) {
+        setOpenPath(fullPath);
+        setEditorValue(initialContent);
+        setDirty(false);
+      }
     } catch (err: any) {
       alert(err?.response?.data?.detail ?? "Failed to create file");
     }
   }
+
+  function buildPageTemplate(componentName: string): string {
+  return `import React, { useEffect, useState } from "react";
+import Layout from "../components/Layout/Layout";
+ 
+export default function ${componentName}() {
+  const [html, setHtml] = useState("");
+  const [err, setErr] = useState("");
+ 
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("http://127.0.0.1:8012/core/plugins/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            slug: "<add slug name you want to display>",
+            reuse: true,
+            input: {},
+            metadata: {},
+          }),
+        });
+ 
+        const json = await res.json();
+        if (!res.ok) throw new Error(json?.detail || "Request failed");
+        setHtml(json?.result?.html || "");
+      } catch (e) {
+        setErr(String(e.message || e));
+      }
+    })();
+  }, []);
+ 
+  return (
+    <Layout>
+      <div>
+        {err && <pre style={{ color: "red" }}>{err}</pre>}
+        {!err && (
+          <div
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        )}
+      </div>
+    </Layout>
+  );
+}
+`;
+}
 
   return (
   <div
