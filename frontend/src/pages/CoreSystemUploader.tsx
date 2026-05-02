@@ -1039,7 +1039,7 @@ export default function ${componentName}() {
               fontWeight: 600,
             }}
           >
-            + Add AI Plugin
+            + Add AI Generated code
           </button>
 
         </div>
@@ -1047,7 +1047,7 @@ export default function ${componentName}() {
         {/* Plugin Runner */}
         <div style={cardStyle}>
           <div style={{ marginBottom: 10, fontWeight: 600 }}>
-            Plugin Runner
+            Generated code Runner
           </div>
 
           <div style={{display: "flex", gap:10}}>
@@ -1072,7 +1072,7 @@ export default function ${componentName}() {
           {runningPlugins.length > 0 && (
           <div style={{ marginTop: 12 }}>
             <div style={{ fontSize: 14, opacity: 0.6, marginBottom: 6 }}>
-              Running Plugins
+              Running Generated Code Files
             </div>
 
             {runningPlugins.map((plugin) => (
@@ -1115,7 +1115,7 @@ export default function ${componentName}() {
     {/* Plugin Studio Modal */}
     <Modal
       open={showPluginModal}
-      title="Add AI Plugin"
+      title="Add AI Generated Code"
       onClose={() => setShowPluginModal(false)}
       width={900}
     >
