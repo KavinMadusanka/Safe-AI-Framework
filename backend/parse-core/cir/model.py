@@ -10,6 +10,7 @@ class TypeDecl:
     kind: Literal["class", "interface", "enum"]
     visibility: Visibility = "package"
     package: Optional[str] = None
+    source_file: Optional[str] = None
     modifiers: Tuple[str, ...] = ()
     is_abstract: bool = False
     is_final: bool = False

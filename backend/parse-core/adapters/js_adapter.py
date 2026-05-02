@@ -818,7 +818,7 @@ def _populate_graph(
 
         graph.add_node(type_id, "TypeDecl", TypeDecl(
             id=type_id, name=short_name, kind=kind,
-            visibility="public", package=pkg, modifiers=(),
+            visibility="public", package=pkg, source_file=source_file, modifiers=(),
             is_abstract=(kind == "interface"), is_final=False,
         ))
         type_nodes[full_name] = type_id

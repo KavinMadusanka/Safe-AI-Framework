@@ -21,7 +21,7 @@ import tempfile
 import time
 from typing import Dict, Any, List, Optional
 
-import requests
+import requests  # type: ignore
 
 from .files_from_blob import materialize_files, strip_fence, detect_languages
 
@@ -706,6 +706,7 @@ def run_uml_pipeline_over_blob(code_blob: str) -> Dict[str, Any]:
                 "ok":         True,
                 "file_count": total_files,
                 "error":      None,
+                "cir":        merged_cir,
 
                 # Rule-based SVGs
                 "class_svg":     uml_rule.get("class_svg"),
