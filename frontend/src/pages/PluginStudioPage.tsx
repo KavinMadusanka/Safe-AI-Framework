@@ -149,7 +149,7 @@ export default function PluginStudioPage({
       {/* Plugin Slug + Title */}
       <div style={{ display: "flex", gap: 30 }}>
         <div style={{ flex: 1 }}>
-          <label style={{ fontWeight: 600 }}>PLUGIN SLUG</label>
+          <label style={{ fontWeight: 600 }}>Generated code SLUG name</label>
           <input
             value={slug}
             onChange={(e) => setSlug(e.target.value)}
@@ -170,7 +170,7 @@ export default function PluginStudioPage({
         </div>
 
         <div style={{ flex: 1 }}>
-          <label style={{ fontWeight: 600 }}>PLUGIN TITLE</label>
+          <label style={{ fontWeight: 600 }}>Generated code TITLE</label>
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -186,7 +186,7 @@ export default function PluginStudioPage({
             }}
           />
           <div style={{ fontSize: 12, opacity: 0.6 }}>
-            The human-readable name of your plugin.
+            The human-readable name of your generated code file.
           </div>
         </div>
       </div>
@@ -214,7 +214,7 @@ export default function PluginStudioPage({
             opacity: busy ? 0.6 : 1,
           }}
         >
-          Save Plugin
+          Save
         </button>
 
       </div>
@@ -230,7 +230,7 @@ export default function PluginStudioPage({
       }}
     >
       <div style={{ fontWeight: 700, marginBottom: 12 }}>
-        EXISTING PLUGINS
+        EXISTING AI generated code file names
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

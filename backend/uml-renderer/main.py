@@ -1,18 +1,29 @@
 from fastapi import FastAPI, HTTPException # type: ignore
+from fastapi.middleware.cors import CORSMiddleware # type: ignore
 from pydantic import BaseModel # type: ignore
 from typing import Optional
 from pathlib import Path
 from plantuml_runner import PlantUMLRenderer
 
-# TODO: change this path to where your plantuml.jar is actually stored
-# PLANTUML_JAR_PATH = r"D:\SLIIT\Year 4\RP\PROJECT\tools\plantuml.jar"
-#PLANTUML_JAR_PATH = r"C:\Users\ASUS\Desktop\Safe-AI-Framework\tools\plantuml.jar"
 BASE_DIR = Path(__file__).resolve().parent
 PLANTUML_JAR_PATH = str(BASE_DIR / "tools" / "plantuml.jar")
 
 renderer = PlantUMLRenderer(PLANTUML_JAR_PATH)
 
 app = FastAPI(title="UML Render Service (PlantUML -> SVG)")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class RenderRequest(BaseModel):

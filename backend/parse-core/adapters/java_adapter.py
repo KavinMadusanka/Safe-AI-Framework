@@ -4,6 +4,77 @@ from typing import Dict, Any, List, Tuple
 from cir.model import TypeDecl, Field, Method, Parameter
 from cir.graph import CIRGraph
 
+# ---------------------------------------------------------------------------
+# bare-method → synthetic class wrapper
+# ---------------------------------------------------------------------------
+import re as _re_wrap
+
+
+def _has_class_declaration(code: str) -> bool:
+    """Quick check: does the code contain a class/interface/enum declaration?"""
+    return bool(_re_wrap.search(
+        r'^\s*(?:public\s+|private\s+|protected\s+|abstract\s+|final\s+)*'
+        r'(?:class|interface|enum)\s+\w+',
+        code, _re_wrap.MULTILINE,
+    ))
+
+
+def _stem_to_class_name_java(source_file: str | None, fallback: str = "Snippet") -> str:
+    if not source_file:
+        return fallback
+    import os as _os
+    stem = _os.path.splitext(_os.path.basename(source_file))[0]
+    parts = _re_wrap.sub(r"[-_]", " ", stem)
+    parts = _re_wrap.sub(r"([a-z])([A-Z])", r"\1 \2", parts)
+    name = "".join(w.capitalize() for w in parts.split())
+    return name if name else fallback
+
+
+def wrap_bare_methods_as_class(
+    code: str,
+    source_file: str | None = None,
+) -> str:
+    """
+    FIX v2: If code has no class declaration but contains method-like patterns,
+    wrap the snippet in a synthetic public class so javalang can parse it.
+    Returns code unchanged if it already has a class declaration.
+    """
+    if _has_class_declaration(code):
+        return code
+
+    has_methods = bool(_re_wrap.search(
+        r'(?:public|private|protected|static|void|int|String|boolean|double|float|long)'
+        r'\s+\w+\s*\(',
+        code,
+    ))
+    if not has_methods:
+        return code
+
+    class_name = _stem_to_class_name_java(source_file, fallback="Snippet")
+
+    lines = code.splitlines()
+    header: List[str] = []
+    body: List[str] = []
+    in_body = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_body and (
+            stripped.startswith("package ")
+            or stripped.startswith("import ")
+            or stripped == ""
+        ):
+            header.append(line)
+        else:
+            in_body = True
+            body.append(line)
+
+    indented = "\n".join("    " + l for l in body)
+    header_str = "\n".join(header)
+    if header_str:
+        header_str += "\n\n"
+    return f"{header_str}public class {class_name} {{\n{indented}\n}}"
+
+
 class JavaAdapter:
     """
     Java → CIRGraph builder.
@@ -133,55 +204,98 @@ class JavaAdapter:
         if not body:
             return calls
 
-        nodes = body if isinstance(body, list) else [body]
         order = 0
 
-        for stmt in nodes:
-            for n in self._walk_ast_in_order(stmt):
-                # new ClassName().method()
-                if isinstance(n, javalang.tree.ClassCreator):
-                    t = getattr(n, "type", None)
-                    cname = getattr(t, "name", "") if t else ""
-                    if cname:
-                        for sel in getattr(n, "selectors", []) or []:
-                            if isinstance(sel, javalang.tree.MethodInvocation):
-                                calls.append(
-                                    {
-                                        "qualifier_kind": "new",
-                                        "qualifier": cname,
-                                        "member": sel.member or "",
-                                        "order": order,
-                                    }
-                                )
-                                order += 1
+        def _infer_this_field_qualifier(path, current_node) -> str:
+            """
+            javalang represents `this.field.method()` as a This node with selectors,
+            where MethodInvocation.qualifier is often empty. Infer the field owner from
+            the selector list so cross-object calls can be resolved.
+            """
+            if not path or len(path) < 2:
+                return ""
 
-                # obj.method() OR method()
-                if isinstance(n, javalang.tree.MethodInvocation):
-                    q = n.qualifier or ""
-                    kind = "none"
-                    if q:
-                        kind = "static" if q[:1].isupper() else "var"
-                    calls.append(
-                        {
-                            "qualifier_kind": kind,
-                            "qualifier": q,
-                            "member": n.member or "",
-                            "order": order,
-                        }
-                    )
-                    order += 1
+            selector_list = path[-1] if isinstance(path[-1], list) else None
+            parent_node = path[-2]
+            if selector_list is None or not isinstance(parent_node, javalang.tree.This):
+                return ""
 
-                # super.method()
-                if isinstance(n, javalang.tree.SuperMethodInvocation):
-                    calls.append(
-                        {
-                            "qualifier_kind": "super",
-                            "qualifier": "super",
-                            "member": n.member or "",
-                            "order": order,
-                        }
-                    )
-                    order += 1
+            try:
+                idx = -1
+                for i, item in enumerate(selector_list):
+                    if item is current_node:
+                        idx = i
+                        break
+                if idx <= 0:
+                    return ""
+
+                for j in range(idx - 1, -1, -1):
+                    prev = selector_list[j]
+                    if isinstance(prev, javalang.tree.MemberReference):
+                        return prev.member or ""
+                    if isinstance(prev, javalang.tree.MethodInvocation):
+                        # Chain of invocation results, not a field-backed target.
+                        break
+            except Exception:
+                return ""
+            return ""
+
+        for path, n in method_or_ctor:
+            # new ClassName().method()
+            if isinstance(n, javalang.tree.ClassCreator):
+                t = getattr(n, "type", None)
+                cname = getattr(t, "name", "") if t else ""
+                if cname:
+                    for sel in getattr(n, "selectors", []) or []:
+                        if isinstance(sel, javalang.tree.MethodInvocation):
+                            calls.append(
+                                {
+                                    "qualifier_kind": "new",
+                                    "qualifier": cname,
+                                    "member": sel.member or "",
+                                    "order": order,
+                                }
+                            )
+                            order += 1
+
+            # obj.method() OR method() OR this.field.method()
+            if isinstance(n, javalang.tree.MethodInvocation):
+                q = n.qualifier or ""
+                kind = "none"
+
+                if q:
+                    first_seg = q.split(".", 1)[0]
+                    if first_seg[:1].isupper():
+                        kind = "static"
+                    else:
+                        kind = "var"
+                else:
+                    inferred_q = _infer_this_field_qualifier(path, n)
+                    if inferred_q:
+                        q = inferred_q
+                        kind = "var"
+
+                calls.append(
+                    {
+                        "qualifier_kind": kind,
+                        "qualifier": q,
+                        "member": n.member or "",
+                        "order": order,
+                    }
+                )
+                order += 1
+
+            # super.method()
+            if isinstance(n, javalang.tree.SuperMethodInvocation):
+                calls.append(
+                    {
+                        "qualifier_kind": "super",
+                        "qualifier": "super",
+                        "member": n.member or "",
+                        "order": order,
+                    }
+                )
+                order += 1
 
         return calls
 
@@ -199,6 +313,7 @@ class JavaAdapter:
         """
         Single-compilation-unit helper (for /parse).
         """
+        code = wrap_bare_methods_as_class(code, source_file=filename)  # FIX v2
         graph = CIRGraph()
         type_nodes: Dict[str, str] = {}
         units: List[Dict[str, Any]] = []
@@ -222,6 +337,7 @@ class JavaAdapter:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     code = f.read()
+                code = wrap_bare_methods_as_class(code, source_file=path)  # FIX v2
                 self._process_compilation_unit(code, graph, type_nodes, units, source_file=path)
             except ValueError as e:
                 errors.append({"file": path, "error": str(e)})
@@ -262,6 +378,7 @@ class JavaAdapter:
                 kind=kind,
                 visibility=visibility,
                 package=package_name,
+                source_file=source_file,
                 modifiers=tuple(t.modifiers or []),
                 is_abstract=is_abstract,
                 is_final=is_final,
@@ -566,9 +683,30 @@ class JavaAdapter:
                     target_type_id = tid
 
                 elif qkind == "var":
-                    var_type = field_type_by_name.get(qual)
-                    if not var_type:
-                        var_type = method_param_types.get(src_method_id, {}).get(qual)
+                    # Handle qualifiers like:
+                    # - repo.method()
+                    # - this.repo.method()
+                    # - this.some.deep.repo.method()  -> tries last segment as fallback
+                    qualifier_candidates: List[str] = []
+                    q = qual.strip()
+                    if q:
+                        qualifier_candidates.append(q)
+                        if q.startswith("this."):
+                            qualifier_candidates.append(q[len("this."):])
+                        if q.startswith("super."):
+                            qualifier_candidates.append(q[len("super."):])
+                        if "." in q:
+                            qualifier_candidates.append(q.split(".")[-1])
+
+                    var_type = None
+                    params_for_method = method_param_types.get(src_method_id, {})
+                    for candidate in qualifier_candidates:
+                        var_type = field_type_by_name.get(candidate)
+                        if not var_type:
+                            var_type = params_for_method.get(candidate)
+                        if var_type:
+                            break
+
                     if not var_type:
                         continue
                     tid = resolve_type_name(var_type, src_id)

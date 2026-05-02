@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException  # type: ignore
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from pydantic import BaseModel  # type: ignore
 from typing import Any, Dict
 from uml_validate import validate_plantuml
@@ -14,10 +15,24 @@ from uml_rules import (
 
 app = FastAPI(title="UML Regex Generator (CIR -> PlantUML)")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class UMLRegexRequest(BaseModel):
     cir: Dict[str, Any]
     diagram_type: str = "class"  # "class", "package", "sequence", "component", "activity"
+    entry_method_name: str | None = None
 
 
 class UMLRegexResponse(BaseModel):
@@ -40,11 +55,11 @@ def uml_regex(req: UMLRegexRequest):
     elif dt == "package":
         plantuml = generate_package_diagram(req.cir)
     elif dt == "sequence":
-        plantuml = generate_sequence_diagram(req.cir)
+        plantuml = generate_sequence_diagram(req.cir, req.entry_method_name)
     elif dt == "component":
         plantuml = generate_component_diagram(req.cir)
     elif dt == "activity":
-        plantuml = generate_activity_diagram(req.cir)
+        plantuml = generate_activity_diagram(req.cir, req.entry_method_name)
     else:
         raise HTTPException(
             status_code=400,

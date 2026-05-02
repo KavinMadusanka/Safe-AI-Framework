@@ -311,6 +311,11 @@ export default function UmlViewerModal({
   const [source, setSource] = useState<UmlSource>("rule");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [entryMethod, setEntryMethod] = useState<string>("");
+  const [ruleLoading, setRuleLoading] = useState(false);
+  const [ruleError, setRuleError] = useState<string | null>(null);
+  const [sequenceRuleOverrideSvg, setSequenceRuleOverrideSvg] = useState<string | null>(null);
+  const [activityRuleOverrideSvg, setActivityRuleOverrideSvg] = useState<string | null>(null);
 
   const inflightRef = useRef<Partial<Record<DiagramType, boolean>>>({});
   const svgContainerRef = useRef<HTMLDivElement>(null);
@@ -329,6 +334,15 @@ export default function UmlViewerModal({
         activity: uml?.activity_svg  ?? null,
       }) as Record<DiagramType, string | null>,
     [uml]
+  );
+
+  const effectiveRuleSvgs = useMemo(
+    () => ({
+      ...ruleSvgs,
+      sequence: sequenceRuleOverrideSvg ?? ruleSvgs.sequence,
+      activity: activityRuleOverrideSvg ?? ruleSvgs.activity,
+    }),
+    [activityRuleOverrideSvg, ruleSvgs, sequenceRuleOverrideSvg]
   );
 
   const aiSvgs = useMemo(
@@ -351,19 +365,77 @@ export default function UmlViewerModal({
   const effectiveSource: UmlSource = source === "ai" && !hasAnyAi ? "rule" : source;
 
   const activeSvg = useMemo(() => {
-    return effectiveSource === "ai" ? aiSvgs[tab] : ruleSvgs[tab];
-  }, [effectiveSource, tab, aiSvgs, ruleSvgs]);
+    const svg = effectiveSource === "ai" ? aiSvgs[tab] : effectiveRuleSvgs[tab];
+    return svg && svg.trim().length > 0 ? svg : null;  // FIX: empty string = no diagram
+  }, [effectiveSource, tab, aiSvgs, effectiveRuleSvgs]);
 
   const tabEnabled = useMemo(() => {
     return (k: DiagramType) => {
-      const ruleHasSvg = !!ruleSvgs[k];
+      const ruleHasSvg = !!effectiveRuleSvgs[k];
       const ruleHasValidation = !!validation[k];
       const aiHasSvg = !!aiSvgs[k];
       return ruleHasSvg || ruleHasValidation || aiHasSvg;
     };
-  }, [aiSvgs, ruleSvgs, validation]);
+  }, [aiSvgs, effectiveRuleSvgs, validation]);
 
   const canGenerateAi = useMemo(() => Boolean(cir || code), [cir, code]);
+
+  useEffect(() => {
+    setSequenceRuleOverrideSvg(null);
+    setActivityRuleOverrideSvg(null);
+  }, [uml]);
+
+  const UML_RULE_API = "http://localhost:7080/uml/regex";
+
+  const regenerateRuleDiagram = async (diagramType: "sequence" | "activity", override?: string) => {
+    if (!cir) {
+      setRuleError("No CIR available to regenerate rule UML.");
+      return;
+    }
+    setRuleLoading(true);
+    setRuleError(null);
+    try {
+      const payload: any = { diagram_type: diagramType, cir };
+      if (override && override.trim().length > 0) payload.entry_method_name = override.trim();
+      const res = await fetch(UML_RULE_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      const plantuml = json.plantuml as string | undefined;
+      if (!plantuml || !plantuml.trim()) {
+        throw new Error("Rule generator returned empty PlantUML.");
+      }
+
+      const renderRes = await fetch("http://localhost:7090/render/svg", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plantuml }),
+      });
+      if (!renderRes.ok) {
+        throw new Error(`SVG render failed: HTTP ${renderRes.status}: ${await renderRes.text()}`);
+      }
+
+      const rendered = await renderRes.json();
+      const svg = (rendered.svg ?? null) as string | null;
+      if (!svg || !svg.trim()) {
+        throw new Error("SVG renderer returned an empty diagram.");
+      }
+
+      if (diagramType === "sequence") {
+        setSequenceRuleOverrideSvg(svg);
+      } else {
+        setActivityRuleOverrideSvg(svg);
+      }
+    } catch (e) {
+      setRuleError(errMsg(e));
+    } finally {
+      setRuleLoading(false);
+    }
+  };
 
   const generateAiFor = async (k: DiagramType) => {
     if (!canGenerateAi) {
@@ -378,11 +450,20 @@ export default function UmlViewerModal({
     setAiError(null);
 
     try {
-      const payload: { diagram_type: DiagramType; cir?: unknown | null; code?: string | null } = {
+      const payload: {
+        diagram_type: DiagramType;
+        cir?: unknown | null;
+        code?: string | null;
+        entry_method_name?: string | null;
+      } = {
         diagram_type: k,
         cir: cir ?? null,
         code: cir ? null : code ?? null,
       };
+
+      if ((k === "sequence" || k === "activity") && entryMethod.trim().length > 0) {
+        payload.entry_method_name = entryMethod.trim();
+      }
 
       const res = await fetch(umlAiApi, {
         method: "POST",
@@ -411,6 +492,20 @@ export default function UmlViewerModal({
     }
   };
 
+  // FIX: auto-jump to first tab that has a rendered SVG when modal opens
+  useEffect(() => {
+    if (!open) return;
+    const TYPES: DiagramType[] = ["class", "sequence", "package", "component", "activity"];
+    const firstWithSvg = TYPES.find((k) => {
+      const s = effectiveRuleSvgs[k];
+      return s && s.trim().length > 0;
+    });
+    if (firstWithSvg && !(effectiveRuleSvgs[tab] && effectiveRuleSvgs[tab]!.trim().length > 0)) {
+      setTab(firstWithSvg);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, effectiveRuleSvgs, setTab, tab]);
+
   useEffect(() => {
     if (!open) return;
     if (source !== "ai") return;
@@ -430,7 +525,8 @@ export default function UmlViewerModal({
     }
   };
 
-  if (!open || !uml || uml.error) return null;
+  if (!open || !uml) return null;
+  // FIX: Don't bail when uml.error is set — partial results are still useful.
 
   return (
     <div
@@ -545,6 +641,37 @@ export default function UmlViewerModal({
               </button>
             </div>
 
+            {/* Entry method override for rule-based sequence */}
+            {(tab === "sequence" || tab === "activity") && (
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  placeholder="entry method "
+                  value={entryMethod}
+                  onChange={(e) => setEntryMethod(e.target.value)}
+                  style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #e2e8f0", fontSize: 12 }}
+                />
+                <button
+                  onClick={() => void regenerateRuleDiagram(tab, entryMethod)}
+                  disabled={ruleLoading || effectiveSource !== "rule" || !cir}
+                  title={
+                    !cir
+                      ? "CIR is not available for this session"
+                      : `Regenerate rule-based ${tab} with optional entry method override`
+                  }
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    background: ruleLoading || effectiveSource !== "rule" || !cir ? "#94a3b8" : "#440561",
+                    color: "white",
+                    border: "none",
+                    cursor: ruleLoading || effectiveSource !== "rule" || !cir ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {ruleLoading ? "Regenerating..." : "Apply"}
+                </button>
+              </div>
+            )}
+
             {/* Download button */}
             {activeSvg && (
               <DownloadMenu onDownload={handleDownload} />
@@ -572,17 +699,37 @@ export default function UmlViewerModal({
         </div>
 
         {/* ── Status row ── */}
-        {(aiError || (aiLoading && effectiveSource === "ai" && !aiSvgs[tab])) && (
+        {(aiError || ruleError || (aiLoading && effectiveSource === "ai" && !aiSvgs[tab]) || ruleLoading) && (
           <div
             style={{
               padding: "10px 16px",
-              background: aiError ? "#fef2f2" : "#f1f5f9",
+              background: aiError || ruleError ? "#fef2f2" : "#f1f5f9",
               borderBottom: "1px solid #e2e8f0",
-              color: aiError ? "#991b1b" : "#334155",
+              color: aiError || ruleError ? "#991b1b" : "#334155",
               fontSize: 13,
             }}
           >
-            {aiError ? aiError : `Generating AI ${tab} diagram...`}
+            {aiError
+              ? aiError
+              : ruleError
+                ? ruleError
+                : aiLoading && effectiveSource === "ai" && !aiSvgs[tab]
+                  ? `Generating AI ${tab} diagram...`
+                  : "Regenerating diagram..."}
+          </div>
+        )}
+
+        {uml.error && (
+          <div style={{
+            margin: "8px 16px 0 16px",
+            padding: "10px 14px",
+            borderRadius: 8,
+            background: "#fef2f2",
+            border: "1px solid #fecaca",
+            color: "#991b1b",
+            fontSize: 13,
+          }}>
+            ⚠ Pipeline error: {uml.error}
           </div>
         )}
 

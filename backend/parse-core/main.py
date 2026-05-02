@@ -24,13 +24,15 @@ from detect import detect_language
 # App + CORS
 # ---------------------------------------------------------
 
-app = FastAPI(title="Parser Core Service", version="0.3.0")
+app = FastAPI(title="Parser Core Service", version="0.4.0")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -106,7 +108,7 @@ def detect(req: DetectRequest) -> DetectResponse:
 
 class ParseRequest(BaseModel):
     code: str
-    filename: str
+    filename: Optional[str] = None
     language: Optional[Literal["java", "python", "javascript", "typescript"]] = None
 
 
@@ -114,6 +116,14 @@ class ParseResponse(BaseModel):
     language: str
     file_count: int
     cir: Dict[str, Any]
+
+# Default filenames used when caller does not provide one (for adapter wrapping)
+_LANG_DEFAULT_FILENAME: Dict[str, str] = {
+    "java":       "snippet.java",
+    "python":     "snippet.py",
+    "javascript": "snippet.js",
+    "typescript": "snippet.ts",
+}
 
 
 @app.post("/parse", response_model=ParseResponse)
@@ -136,8 +146,13 @@ def parse(req: ParseRequest) -> ParseResponse:
             ),
         )
 
+    # FIX: if no filename given, use a default that carries the right extension
+    # so wrap_bare_functions_as_class / wrap_bare_methods_as_class can derive
+    # a clean class name and the correct wrapping behaviour is triggered.
+    effective_filename = req.filename or _LANG_DEFAULT_FILENAME.get(lang, "snippet.py")
+
     adapter = _get_adapter(lang)
-    graph = adapter.build_cir_graph_for_code(req.code, filename=req.filename)
+    graph = adapter.build_cir_graph_for_code(req.code, filename=effective_filename)
     cir = graph.to_debug_json()
 
     return ParseResponse(

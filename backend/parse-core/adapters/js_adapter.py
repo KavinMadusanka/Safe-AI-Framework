@@ -1,6 +1,4 @@
 """
-backend/parse-core/adapters/js_adapter.py
-
 JavaScript / TypeScript → CIRGraph builder.  v3
 
 What's new in v3
@@ -239,6 +237,13 @@ _RE_ROUTER_METHOD = re.compile(
     r'router\.(get|post|put|patch|delete|use)\s*\(\s*[\'"]([^\'"]*)[\'"]',
     re.MULTILINE,
 )
+# Plain (non-exported) function declarations — catches bare snippets like:
+#   function login(username, password) { ... }
+#   async function register(req, res) { ... }
+_RE_PLAIN_FUNC = re.compile(
+    r'^(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)',
+    re.MULTILINE,
+)
 
 
 def _stem_to_class_name(stem: str) -> str:
@@ -323,6 +328,13 @@ def _extract_module_functions(
         fname     = m.group(1)
         param_str = m.group(2)
         is_async  = "async" in code[m.start():m.start() + 30]
+        _add_method(fname, param_str, is_async)
+
+    # Plain (non-exported) function declarations — catches bare snippets
+    for m in _RE_PLAIN_FUNC.finditer(code):
+        fname     = m.group(1)
+        param_str = m.group(2)
+        is_async  = code[m.start():m.start() + 20].startswith("async")
         _add_method(fname, param_str, is_async)
 
     # Express router routes — represent as pseudo-methods named after HTTP verb + path
@@ -806,7 +818,7 @@ def _populate_graph(
 
         graph.add_node(type_id, "TypeDecl", TypeDecl(
             id=type_id, name=short_name, kind=kind,
-            visibility="public", package=pkg, modifiers=(),
+            visibility="public", package=pkg, source_file=source_file, modifiers=(),
             is_abstract=(kind == "interface"), is_final=False,
         ))
         type_nodes[full_name] = type_id
@@ -990,19 +1002,40 @@ def _add_relationship_edges(
             elif qkind == "field":
                 var_type = field_type_by_name.get(qual)
                 if not var_type or var_type in _JS_PRIMITIVES:
-                    continue
-                t = resolve(var_type, src_id)
-                if not t:
-                    continue
-                target_type_id = t
+                    # FIX: JS has no type annotations so constructor fields
+                    # like `this.userRepository = userRepository` get type 'any'.
+                    # Try resolving the field name directly as a class:
+                    # userRepository -> UserRepository, tokenService -> TokenService
+                    # Strategy 1: capitalise first letter
+                    candidate = qual[0].upper() + qual[1:] if qual else ""
+                    t = resolve(candidate, src_id) if candidate else None
+                    if not t:
+                        # Strategy 2: try exact name (for already-PascalCase fields)
+                        t = resolve(qual, src_id)
+                    if not t:
+                        continue
+                    target_type_id = t
+                else:
+                    t = resolve(var_type, src_id)
+                    if not t:
+                        continue
+                    target_type_id = t
             elif qkind == "var":
                 var_type = field_type_by_name.get(qual)
-                if not var_type:
-                    continue
-                t = resolve(var_type, src_id)
-                if not t:
-                    continue
-                target_type_id = t
+                if not var_type or var_type in _JS_PRIMITIVES:
+                    # FIX: same heuristic for var-qualified calls
+                    candidate = qual[0].upper() + qual[1:] if qual else ""
+                    t = resolve(candidate, src_id) if candidate else None
+                    if not t:
+                        t = resolve(qual, src_id)
+                    if not t:
+                        continue
+                    target_type_id = t
+                else:
+                    t = resolve(var_type, src_id)
+                    if not t:
+                        continue
+                    target_type_id = t
             elif qkind in ("self", "cls"):
                 target_type_id = src_id
 
@@ -1186,9 +1219,12 @@ class JSAdapter:
                     existing.add(u["short_name"])
 
         # ── Pass 4: Module-level function extraction (Option B) ───────────
-        # Only runs when NO classes were found (functional-style file)
-        if not units and stem and stem not in _SKIP_FILE_STEMS:
-            pseudo = _extract_module_functions(code, module_name, stem)
+        # Runs when NO classes were found (functional-style file OR bare snippet).
+        # FIX: also runs when stem is empty (pasted snippet with no filename),
+        # and skips _SKIP_FILE_STEMS only when we actually have a stem.
+        if not units:
+            effective_stem = stem if (stem and stem not in _SKIP_FILE_STEMS) else "Snippet"
+            pseudo = _extract_module_functions(code, module_name, effective_stem)
             if pseudo:
                 units.append(pseudo)
 

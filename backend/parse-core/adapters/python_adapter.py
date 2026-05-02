@@ -28,10 +28,84 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from cir.model import TypeDecl, Field, Method, Parameter
 from cir.graph import CIRGraph
+import textwrap as _textwrap
+
+# ---------------------------------------------------------------------------
+# bare-function → pseudo-class wrapper
+# ---------------------------------------------------------------------------
+
+def _has_top_level_classes(tree: ast.Module) -> bool:
+    """Return True if the module has at least one top-level ClassDef."""
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            return True
+    return False
+
+
+def _top_level_functions_list(tree: ast.Module) -> List:
+    """Return all top-level (Async)FunctionDef nodes."""
+    funcs = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs.append(node)
+    return funcs
+
+
+def _stem_to_class_name_py(source_file: Optional[str], fallback: str = "Module") -> str:
+    if not source_file:
+        return fallback
+    stem = os.path.splitext(os.path.basename(source_file))[0]
+    parts = re.sub(r"[-_]", " ", stem)
+    parts = re.sub(r"([a-z])([A-Z])", r"\1 \2", parts)
+    name = "".join(w.capitalize() for w in parts.split())
+    return name if name else fallback
+
+
+def wrap_bare_functions_as_class(
+    code: str,
+    source_file: Optional[str] = None,
+) -> str:
+    """
+    FIX v2: If code has top-level function defs but NO class defs, wrap
+    everything in a synthetic class so the adapter produces a real CIR.
+    The class name comes from the filename stem (auth.py -> Auth).
+    Returns code unchanged if classes already exist or code is unparseable.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+
+    if _has_top_level_classes(tree):
+        return code
+
+    funcs = _top_level_functions_list(tree)
+    if not funcs:
+        return code
+
+    class_name = _stem_to_class_name_py(source_file, fallback="Module")
+    lines = code.splitlines()
+    first_func_lineno = min(f.lineno for f in funcs)
+    header_lines = lines[: first_func_lineno - 1]
+
+    func_blocks: List[str] = []
+    for func in sorted(funcs, key=lambda f: f.lineno):
+        block = "\n".join(lines[func.lineno - 1 : func.end_lineno])
+        func_blocks.append(_textwrap.indent(block, "    "))
+
+    wrapped = "\n".join(header_lines)
+    if wrapped:
+        wrapped += "\n\n"
+    wrapped += f"class {class_name}:\n"
+    wrapped += "    def __init__(self):\n        pass\n\n"
+    wrapped += "\n\n".join(func_blocks)
+    return wrapped
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -71,6 +145,58 @@ _OPTIONAL_PREFIXES = (
     "Optional[",
     "Union[",
 )
+
+
+# ---------------------------------------------------------------------------
+# FIX A: Package extraction — derive a clean logical package name from filepath
+# ---------------------------------------------------------------------------
+
+def _extract_package(filepath: Optional[str]) -> str:
+    """
+    Derive a clean logical package name from a Python source file path.
+
+    Priority:
+      1. If the file lives inside a proper Python package (has __init__.py
+         siblings), walk up to find the package root and return the dotted
+         package path.
+      2. Otherwise return just the file's stem (filename without .py),
+         converted to a clean identifier.
+      3. Fall back to "(default)".
+
+    Never returns a full absolute path, so temp-file paths such as
+    C:\\Users\\HP\\AppData\\Local\\Temp\\tmpdzvzkxsr\\Main are reduced to
+    just "Main" (or "(default)" when the stem looks like a random hash).
+    """
+    if not filepath:
+        return "(default)"
+
+    filepath = os.path.normpath(filepath)
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+
+    # Walk upward collecting package segments while __init__.py exists
+    segments = []
+    current_dir = os.path.dirname(filepath)
+    for _ in range(10):  # max 10 levels
+        if os.path.isfile(os.path.join(current_dir, "__init__.py")):
+            segments.insert(0, os.path.basename(current_dir))
+            current_dir = os.path.dirname(current_dir)
+        else:
+            break
+
+    if segments:
+        return ".".join(segments)
+
+    # No package structure — use just the stem, cleaned up
+    clean = re.sub(r"[^a-zA-Z0-9_]", "_", stem).strip("_")
+    if not clean or len(clean) < 2:
+        return "(default)"
+
+    # If the stem looks like a temp hash (all lowercase letters+digits, no
+    # underscores or uppercase letters, 8+ chars) treat it as a temp artifact
+    if re.match(r"^[a-z0-9]{8,}$", clean) and not re.search(r"[_A-Z]", stem):
+        return "(default)"
+
+    return clean
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +313,7 @@ def _is_abc_interface(node: ast.ClassDef) -> bool:
         return False
     return all(_method_flags(m)[1] for m in methods)
 
+
 def _extract_module_vars(tree: ast.Module) -> Dict[str, str]:
     """
     Scan module-level statements for singleton/instance assignments of the form:
@@ -272,6 +399,21 @@ def _extract_ordered_calls(func: ast.FunctionDef | ast.AsyncFunctionDef) -> List
                     })
                     order_counter[0] += 1
 
+                # FIX: handle self.field.method() — two-level attribute access
+                # Pattern: self.user_repo.find_by_username(...)
+                #   → qualifier_kind=field, qualifier=user_repo, member=find_by_username
+                elif (isinstance(value, ast.Attribute)
+                      and isinstance(value.value, ast.Name)
+                      and value.value.id == "self"):
+                    field_name = value.attr
+                    calls.append({
+                        "qualifier_kind": "field",
+                        "qualifier": field_name,
+                        "member": member,
+                        "order": order_counter[0],
+                    })
+                    order_counter[0] += 1
+
                 elif isinstance(value, ast.Name):
                     name = value.id
                     kind = "var" if name[:1].islower() else "static"
@@ -307,6 +449,26 @@ def _extract_ordered_calls(func: ast.FunctionDef | ast.AsyncFunctionDef) -> List
 def _extract_init_self_fields(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> List[Dict[str, Any]]:
+    """
+    Extract self.x = ... assignments from __init__ and determine their types.
+
+    FIX v2: build a param_type_map from __init__ parameter annotations so that
+    patterns like:
+        def __init__(self, repo: UserRepository):
+            self.repo = repo          # ← type inferred as UserRepository
+    produce Field.type_name = 'UserRepository' instead of 'Any'.
+    This enables CALLS and ASSOCIATES edge resolution for dependency-injected
+    collaborators, which is the dominant pattern in Python service classes.
+    """
+    # Build param name → annotated type from __init__ signature
+    param_type_map: Dict[str, str] = {}
+    for arg in func.args.args:
+        if arg.arg in ("self", "cls") or arg.annotation is None:
+            continue
+        logical, _, _ = _resolve_annotation(arg.annotation)
+        if logical and logical not in ("Any", "None", "object"):
+            param_type_map[arg.arg] = logical
+
     fields: List[Dict[str, Any]] = []
     seen: set = set()
 
@@ -339,7 +501,15 @@ def _extract_init_self_fields(
                     name = tgt.attr
                     if name not in seen:
                         seen.add(name)
+                        # FIX: if RHS is a plain name that matches an annotated
+                        # __init__ param, use that param's type instead of Any
                         logical, raw, mult = _infer_rhs_type(stmt.value)
+                        if (logical in ("Any",) and isinstance(stmt.value, ast.Name)
+                                and stmt.value.id in param_type_map):
+                            resolved = param_type_map[stmt.value.id]
+                            logical = resolved
+                            raw = resolved
+                            mult = mult or "1"
                         fields.append({
                             "name": name,
                             "type_name": logical,
@@ -401,6 +571,7 @@ class PythonAdapter:
         code: str,
         filename: Optional[str] = None,
     ) -> CIRGraph:
+        code = wrap_bare_functions_as_class(code, source_file=filename)  # FIX v2
         graph = CIRGraph()
         type_nodes: Dict[str, str] = {}
         units: List[Dict[str, Any]] = []
@@ -419,6 +590,7 @@ class PythonAdapter:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     code = f.read()
+                code = wrap_bare_functions_as_class(code, source_file=path)  # FIX v2
                 tree = self.parse_to_ast(code)
                 all_module_vars.update(_extract_module_vars(tree))
             except Exception:
@@ -428,10 +600,11 @@ class PythonAdapter:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     code = f.read()
+                code = wrap_bare_functions_as_class(code, source_file=path)  # FIX v2
                 self._process_module(
                     code, graph, type_nodes, units,
                     source_file=path,
-                    project_module_vars=all_module_vars, 
+                    project_module_vars=all_module_vars,
                 )
             except ValueError as e:
                 errors.append({"file": path, "error": str(e)})
@@ -480,6 +653,7 @@ class PythonAdapter:
                 source_file=source_file,
                 module_vars=module_vars,
             )
+
     def _process_class(
         self,
         node: ast.ClassDef,
@@ -500,12 +674,17 @@ class PythonAdapter:
 
         type_id = f"type:{full_name}"
 
+        # FIX A: derive a clean logical package name from source_file rather
+        # than using the raw module_name (which may contain a full temp path).
+        package = _extract_package(source_file)
+
         type_decl = TypeDecl(
             id=type_id,
             name=short_name,
             kind=kind,
             visibility="public",
-            package=module_name,
+            package=package,
+            source_file=source_file,
             modifiers=("abstract",) if is_abstract_class else (),
             is_abstract=is_abstract_class,
             is_final=False,
@@ -800,11 +979,11 @@ class PythonAdapter:
                         continue
                     target_type_id = t
 
-                elif qkind == "var":
+                elif qkind in ("var", "field"):
                     # Resolution priority:
-                    #   1. self-fields (self.db_manager = DatabaseManager())
+                    #   1. self-fields:  self.repo = SomeClass()  OR  self.repo.method()
                     #   2. method parameters
-                    #   3. module-level singleton variables 
+                    #   3. module-level singleton variables
                     var_type = field_type_by_name.get(qual)
                     if not var_type:
                         var_type = method_param_types.get(src_method_id, {}).get(qual)
