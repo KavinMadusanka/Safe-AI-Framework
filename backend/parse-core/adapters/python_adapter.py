@@ -684,6 +684,7 @@ class PythonAdapter:
             kind=kind,
             visibility="public",
             package=package,
+            source_file=source_file,
             modifiers=("abstract",) if is_abstract_class else (),
             is_abstract=is_abstract_class,
             is_final=False,
