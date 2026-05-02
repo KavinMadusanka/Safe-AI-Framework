@@ -266,10 +266,11 @@ def generate_class_diagram(cir: Dict[str, Any]) -> str:
 
     def _is_class_diagram_noise(type_name: str) -> bool:
         n = (type_name or "").strip().lower()
-        if n == "bcrypt":
+        if n in {"bcrypt", "config", "securityheadersmiddleware"}:
+        #if n == "bcrypt":
             return True
-        if n == "config":
-            return True
+        #if n == "config":
+        #    return True
         return False
 
     # Remove entry-point types (Main/Application/Bootstrap or static-main app classes)
@@ -499,7 +500,7 @@ def _infer_package_from_type_name(type_name: str) -> str:
         return "security"
     if any(k in name for k in ("entity", "model", "dto", "vo", "record", "user", "student", "account")):
         return "model"
-    if any(k in name for k in ("util", "helper", "common", "shared", "config")):
+    if any(k in name for k in ("util", "helper", "common", "shared", "config","loggar")):
         return "common"
 
     return "default"
@@ -589,6 +590,23 @@ def generate_package_diagram(cir: Dict[str, Any]) -> str:
 
         # Single CamelCase token is usually synthetic for our parser path.
         return p[:1].isupper()
+
+    def _is_single_file_cir() -> bool:
+        # Preferred path: adapters now emit source_file on each TypeDecl.
+        source_files: Set[str] = {
+            str((attrs.get("source_file") or "")).strip()
+            for attrs in type_nodes.values()
+            if str((attrs.get("source_file") or "")).strip()
+        }
+        if source_files:
+            return len(source_files) == 1
+
+        # Backward-compatible fallback for older CIR payloads.
+        if has_explicit_package and len(unique_explicit_packages) == 1:
+            only_pkg = next(iter(unique_explicit_packages))
+            if _looks_synthetic_single_package(only_pkg):
+                return True
+        return False
 
     for type_id, attrs in type_nodes.items():
         type_name = attrs.get("name", type_id)
@@ -697,13 +715,41 @@ def generate_package_diagram(cir: Dict[str, Any]) -> str:
             if pkg in involved_packages
         }
 
+    root_prefix = ""
+    all_pkgs = [p for p in package_to_types if p != "(default)"]
+    if len(all_pkgs) > 1:
+        parts_list = [p.split(".") for p in all_pkgs]
+        common: List[str] = []
+        for segs in zip(*parts_list):
+            if len(set(segs)) == 1:
+                common.append(segs[0])
+            else:
+                break
+        root_prefix = ".".join(common)
+
+    is_single_file_diagram = _is_single_file_cir()
+
     if package_to_types:
         lines.append("")
 
+    wrap_root = bool(package_to_types)
+    root_label = root_prefix if root_prefix else "System"
+
+    if wrap_root and is_single_file_diagram:
+        lines.append('package "System" as __single_file_scope__ {')
+    elif wrap_root:
+        lines.append(f'package "{root_label}" {{')
+
     for package_name in sorted(package_to_types.keys()):
-        lines.append(f'package "{package_name}" {{')
+        package_indent = "  " if is_single_file_diagram else ""
+        type_indent = "    " if is_single_file_diagram else "  "
+        lines.append(f'{package_indent}package "{package_name}" {{')
         for type_decl in sorted(package_to_types[package_name]):
-            lines.append(f"  {type_decl}")
+            lines.append(f"{type_indent}{type_decl}")
+        lines.append(f"{package_indent}}}")
+        lines.append("")
+
+    if wrap_root:
         lines.append("}")
         lines.append("")
 
@@ -720,7 +766,7 @@ def generate_package_diagram(cir: Dict[str, Any]) -> str:
 #  SEQUENCE DIAGRAM
 # ══════════════════════════════════════════════════════════════════════════════
 
-def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
+def generate_sequence_diagram(cir: Dict[str, Any], entry_method_name: Optional[str] = None) -> str:
     nodes_by_id, edges = _index_cir(cir)
     type_nodes, _, methods_by_type = _extract_types_and_members(nodes_by_id, edges)
 
@@ -741,9 +787,10 @@ def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
         tid: str(attrs.get("package") or "") for tid, attrs in type_nodes.items()
     }
 
-    call_edges: List[Tuple[int, str, str]] = []
-    incoming_method_count: Dict[str, int] = {}
-    outgoing_by_method: Dict[str, List[Tuple[int, str]]] = {}
+    call_edges: List[Tuple[int, int, str, str]] = []
+    incoming_by_method: Dict[str, List[str]] = {}
+    outgoing_by_method: Dict[str, List[Tuple[int, int, str]]] = {}
+    edge_serial = 0
 
     for edge in edges:
         if edge.get("type") != "CALLS":
@@ -754,9 +801,11 @@ def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
             continue
 
         order = int((edge.get("attrs") or {}).get("order", 0))
-        call_edges.append((order, src_method_id, dst_method_id))
-        incoming_method_count[dst_method_id] = incoming_method_count.get(dst_method_id, 0) + 1
-        outgoing_by_method.setdefault(src_method_id, []).append((order, dst_method_id))
+        edge_id = edge_serial
+        edge_serial += 1
+        call_edges.append((order, edge_id, src_method_id, dst_method_id))
+        incoming_by_method.setdefault(dst_method_id, []).append(src_method_id)
+        outgoing_by_method.setdefault(src_method_id, []).append((order, edge_id, dst_method_id))
 
     for src_method_id in list(outgoing_by_method.keys()):
         outgoing_by_method[src_method_id].sort(key=lambda x: (x[0], x[1]))
@@ -764,85 +813,376 @@ def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
     def _participant_alias(type_id: str) -> str:
         return "P_" + re.sub(r"[^a-zA-Z0-9_]", "_", type_id)
 
-    def _method_priority(method_id: str) -> Tuple[int, int, int, str, str]:
+    def _normalize_method_name(name: Optional[str]) -> str:
+        return re.sub(r"\s+", "", (name or "").strip().lower())
+
+    def _matches_entry_override(method_id: str, override_name: str) -> bool:
+        if not override_name:
+            return False
+
+        attrs = method_attrs_by_id.get(method_id, {})
+        method_name = _normalize_method_name(str(attrs.get("name") or ""))
+        if method_name == override_name:
+            return True
+
+        owner_id = owner_type_by_method_id.get(method_id, "")
+        owner_name = _normalize_method_name(type_name_by_id.get(owner_id, ""))
+        if owner_name and override_name in owner_name:
+            return True
+
+        qualified_name = _normalize_method_name(f"{type_name_by_id.get(owner_id, '')}.{attrs.get('name') or ''}")
+        return qualified_name == override_name or qualified_name.endswith(f".{override_name}")
+
+    def _method_name_is_internal(method_name: str) -> bool:
+        n = (method_name or "").strip().lower()
+        if not n:
+            return True
+        if n.startswith("_") and n not in {"__call__"}:
+            return True
+        if n in {"main", "constructor", "__init__", "init"}:
+            return True
+        if any(n.startswith(prefix) for prefix in ("init", "initialize", "setup", "bootstrap")):
+            return True
+        return False
+
+    def _method_visibility_rank(method_attrs: Dict[str, Any]) -> int:
+        vis = str(method_attrs.get("visibility") or "").lower()
+        if vis == "public":
+            return 0
+        if vis in {"package", "internal", ""}:
+            return 1
+        if vis == "protected":
+            return 2
+        if vis == "private":
+            return 3
+        return 1
+
+    def _entry_name_rank(name: str) -> int:
+        n = (name or "").lower()
+        preferred = (
+            # Generic orchestration verbs only. Avoid domain-specific bias so the
+            # generator can auto-pick scenarios from arbitrary code.
+            "start", "run", "execute", "process", "handle", "initiate",
+            "submit", "create", "save", "update", "delete", "remove",
+            "open", "close", "send", "perform", "call",
+        )
+        for idx, token in enumerate(preferred):
+            if token in n:
+                return idx
+        return 99
+
+    def _is_demo_or_entry_method(method_id: str) -> bool:
+        owner_id = owner_type_by_method_id.get(method_id, "")
+        owner_name = type_name_by_id.get(owner_id, "")
+        owner_methods = methods_by_type.get(owner_id, [])
+        if _is_entry_or_demo_type(owner_name, owner_methods):
+            return True
+        method_name = str(method_attrs_by_id.get(method_id, {}).get("name") or "").lower()
+        return method_name == "main"
+
+    def _method_priority(method_id: str) -> Tuple[int, int, int, int, int, int, int, int, str, str]:
         attrs = method_attrs_by_id.get(method_id, {})
         owner_id = owner_type_by_method_id.get(method_id, "")
         type_name = str(type_name_by_id.get(owner_id, ""))
         type_pkg = str(type_package_by_id.get(owner_id, ""))
         method_name = str(attrs.get("name") or "")
-        incoming_rank = 1 if incoming_method_count.get(method_id, 0) > 0 else 0
+
+        incoming_sources = incoming_by_method.get(method_id, [])
+        incoming_non_demo = 0
+        for src_mid in incoming_sources:
+            src_owner = owner_type_by_method_id.get(src_mid, "")
+            src_tname = type_name_by_id.get(src_owner, "")
+            src_methods = methods_by_type.get(src_owner, [])
+            if _is_entry_or_demo_type(src_tname, src_methods):
+                continue
+            incoming_non_demo += 1
+
+        outgoing = outgoing_by_method.get(method_id, [])
+        outgoing_external = 0
+        for _, _, dst_mid in outgoing:
+            if owner_type_by_method_id.get(dst_mid, "") != owner_id:
+                outgoing_external += 1
+
+        demo_rank = 1 if _is_entry_or_demo_type(type_name, methods_by_type.get(owner_id, [])) else 0
         noise_rank = 1 if _is_infrastructure_noise(type_name, type_pkg) else 0
-        layer_rank = _layer_order(type_name, type_pkg)
-        return (incoming_rank, noise_rank, layer_rank, type_name, method_name)
+        ctor_rank = 1 if attrs.get("is_constructor") else 0
+        internal_rank = 1 if _method_name_is_internal(method_name) else 0
+        visibility_rank = _method_visibility_rank(attrs)
+        interaction_rank = 0 if outgoing_external > 0 else 1
+        root_rank = 0 if incoming_non_demo == 0 else 1
+
+        return (
+            demo_rank,
+            noise_rank,
+            ctor_rank,
+            internal_rank,
+            root_rank,
+            visibility_rank,
+            interaction_rank,
+            -outgoing_external,
+            f"{_entry_name_rank(method_name):03d}:{type_name}",
+            method_name,
+        )
+
+    def _is_getter_or_setter(method_name: str) -> bool:
+        n = (method_name or "").strip().lower()
+        return n.startswith("get") or n.startswith("set")
+
+    def _is_low_level_call(dst_method_id: str) -> bool:
+        dst_attrs = method_attrs_by_id.get(dst_method_id, {})
+        dst_name = str(dst_attrs.get("name") or "")
+        dst_owner = owner_type_by_method_id.get(dst_method_id, "")
+        dst_type_name = str(type_name_by_id.get(dst_owner, ""))
+        dst_pkg = str(type_package_by_id.get(dst_owner, ""))
+        dst_combined = (dst_type_name + " " + dst_pkg).lower()
+        dst_name_l = dst_name.lower()
+
+        if _method_name_is_internal(dst_name):
+            return True
+
+        if any(t in dst_combined for t in (" logger", ".logger", "logging")):
+            return True
+
+        if any(t in dst_combined for t in ("config", "configuration")):
+            return True
+
+        if dst_name_l in {"info", "warn", "warning", "error", "debug", "trace", "redactsensitivedata"}:
+            return True
+
+        if _is_getter_or_setter(dst_name):
+            if any(t in dst_combined for t in ("model", "entity", "dto", "config", "database", "db")):
+                return True
+            if dst_name_l in {
+                "getdburl", "getdbusername", "getdbpassword", "getconnection",
+                "getemail", "getid", "getusername", "gethashedpassword",
+            }:
+                return True
+
+        if any(t in dst_combined for t in ("config", "database", "dbmanager", "connectionmanager")) and dst_name_l.startswith("get"):
+            return True
+
+        return False
+
+    def _detect_conditional_calls(outgoing_calls: List[Tuple[int, int, str]]) -> Dict[str, List[Tuple[int, int, str]]]:
+        grouped: Dict[str, List[Tuple[int, int, str]]] = {
+            "main": [],
+            "if_block": [],
+            "else_block": [],
+        }
+        seen_by_group: Dict[str, Set[str]] = {
+            "main": set(),
+            "if_block": set(),
+            "else_block": set(),
+        }
+        for order, edge_id, dst_id in outgoing_calls:
+            dst_name = str(method_attrs_by_id.get(dst_id, {}).get("name") or "").lower()
+            if any(x in dst_name for x in ("warning", "error", "fail", "invalid", "deny", "block")):
+                if dst_id not in seen_by_group["else_block"]:
+                    grouped["else_block"].append((order, edge_id, dst_id))
+                    seen_by_group["else_block"].add(dst_id)
+            elif any(x in dst_name for x in ("success", "token", "record", "update", "create", "issue", "grant", "allow", "loginfo", "info")):
+                if dst_id not in seen_by_group["if_block"]:
+                    grouped["if_block"].append((order, edge_id, dst_id))
+                    seen_by_group["if_block"].add(dst_id)
+            else:
+                if dst_id not in seen_by_group["main"]:
+                    grouped["main"].append((order, edge_id, dst_id))
+                    seen_by_group["main"].add(dst_id)
+        return grouped
+
+    def _is_predicate_call(method_name: str) -> bool:
+        n = (method_name or "").strip().lower()
+        if not n:
+            return False
+        if n.startswith(("is", "has", "can", "should", "exists")):
+            return True
+        return any(k in n for k in ("taken", "exists", "available", "duplicate"))
+
+    def _infer_return_label(method_name: str) -> str:
+        n = (method_name or "").strip().lower()
+        if not n:
+            return "result"
+        if n.startswith(("is", "has", "can", "should", "verify", "authenticate")) or any(
+            k in n for k in ("taken", "exists", "valid", "match")
+        ):
+            return "true/false"
+        if "hash" in n:
+            return "hashedPassword"
+        if n.startswith(("save", "create", "update", "delete", "register")):
+            return "success/failure"
+        if n.startswith(("find", "get", "list")):
+            return "data"
+        return "result"
+
+    def _infer_guard_labels(method_name: str) -> Tuple[str, str]:
+        n = (method_name or "").strip().lower()
+        if "student_id" in n:
+            return ("student_id exists", "student_id not found")
+        if "username" in n and ("taken" in n or "exist" in n or "find" in n):
+            return ("username exists", "username available")
+        if "username" in n and ("taken" in n or "exists" in n):
+            return ("username already taken", "username available")
+        if "email" in n and ("taken" in n or "exists" in n):
+            return ("email already exists", "email available")
+        if "valid" in n or "verify" in n:
+            return ("validation failed", "validation passed")
+        return ("condition true", "condition false")
+
+    def _emit_call_with_return(lines_out: List[str], src_method_id: str, dst_method_id: str) -> bool:
+        src_type_id = owner_type_by_method_id.get(src_method_id, "")
+        dst_type_id = owner_type_by_method_id.get(dst_method_id, "")
+        if not src_type_id or not dst_type_id:
+            return False
+
+        dst_method_name = str(method_attrs_by_id.get(dst_method_id, {}).get("name") or "call")
+        src_alias = _participant_alias(src_type_id)
+        dst_alias = _participant_alias(dst_type_id)
+        lines_out.append(f"{src_alias} -> {dst_alias} : {_safe_sequence_label(dst_method_name)}")
+        lines_out.append(f"activate {dst_alias}")
+        lines_out.append(f"{dst_alias} --> {src_alias} : {_infer_return_label(dst_method_name)}")
+        lines_out.append(f"deactivate {dst_alias}")
+        return True
 
     lines: List[str] = [
         "@startuml",
         "skinparam shadowing false",
         "skinparam sequenceMessageAlign center",
+        "hide footbox",
         "autonumber",
     ]
 
+    override_name = _normalize_method_name(entry_method_name)
+
     if call_edges:
-        entry_methods = sorted(outgoing_by_method.keys(), key=_method_priority)
-        entry_method_id = entry_methods[0]
+        entry_method_id: Optional[str] = None
 
-        chain: List[Tuple[str, str]] = []
-        visited_calls: Set[Tuple[str, str]] = set()
-        cursor = entry_method_id
-        max_steps = 40
+        if override_name:
+            matching_methods = [
+                mid for mid in outgoing_by_method.keys()
+                if _matches_entry_override(mid, override_name)
+            ]
+            if matching_methods:
+                entry_method_id = sorted(matching_methods, key=_method_priority)[0]
 
-        while len(chain) < max_steps:
-            next_candidates = outgoing_by_method.get(cursor, [])
-            next_method_id: Optional[str] = None
-            for _, dst_method_id in next_candidates:
-                pair = (cursor, dst_method_id)
-                if pair in visited_calls:
+        if entry_method_id is None:
+            entry_methods = sorted(outgoing_by_method.keys(), key=_method_priority)
+            if entry_methods:
+                entry_method_id = entry_methods[0]
+
+        if entry_method_id:
+
+            # Prefer the first real business call invoked from main/demo wrappers.
+            demo_outgoing: List[Tuple[int, int, str]] = []
+            for src_mid, edges_out in outgoing_by_method.items():
+                if not _is_demo_or_entry_method(src_mid):
                     continue
-                next_method_id = dst_method_id
+                demo_outgoing.extend(edges_out)
+            demo_outgoing.sort(key=lambda x: (x[0], x[1]))
+
+            for _, _, demo_dst_mid in demo_outgoing:
+                if _is_demo_or_entry_method(demo_dst_mid):
+                    continue
+                demo_dst_owner = owner_type_by_method_id.get(demo_dst_mid, "")
+                demo_dst_type_name = str(type_name_by_id.get(demo_dst_owner, ""))
+                demo_dst_pkg = str(type_package_by_id.get(demo_dst_owner, ""))
+                if _is_infrastructure_noise(demo_dst_type_name, demo_dst_pkg):
+                    continue
+                # Keep the chosen scenario at component level.
+                if _is_low_level_call(demo_dst_mid):
+                    continue
+                entry_method_id = demo_dst_mid
                 break
 
-            if not next_method_id:
-                break
+            entry_type_id = owner_type_by_method_id.get(entry_method_id, "")
+            entry_method_name = str(method_attrs_by_id.get(entry_method_id, {}).get("name") or "request")
 
-            chain.append((cursor, next_method_id))
-            visited_calls.add((cursor, next_method_id))
-            cursor = next_method_id
-
-        if not chain:
-            ordered_edges = sorted(call_edges, key=lambda x: (x[0], x[1], x[2]))
-            chain = [(src, dst) for _, src, dst in ordered_edges[:20]]
-
-        participant_order: List[str] = []
-        seen_participants: Set[str] = set()
-
-        for src_method_id, dst_method_id in chain:
-            src_type_id = owner_type_by_method_id.get(src_method_id, "")
-            dst_type_id = owner_type_by_method_id.get(dst_method_id, "")
-            for type_id in (src_type_id, dst_type_id):
-                if not type_id or type_id in seen_participants:
+            direct_calls: List[Tuple[int, int, str]] = []
+            for order, edge_id, dst_method_id in outgoing_by_method.get(entry_method_id, []):
+                dst_type_id = owner_type_by_method_id.get(dst_method_id, "")
+                if not dst_type_id or dst_type_id == entry_type_id:
                     continue
-                seen_participants.add(type_id)
-                participant_order.append(type_id)
+                if _is_low_level_call(dst_method_id):
+                    continue
+                direct_calls.append((order, edge_id, dst_method_id))
 
-        for type_id in participant_order:
-            display = type_name_by_id.get(type_id, type_id)
-            lines.append(f'participant "{display}" as {_participant_alias(type_id)}')
+            participant_order: List[str] = []
+            if entry_type_id:
+                participant_order.append(entry_type_id)
 
-        if participant_order:
-            lines.append("")
+            seen_participants: Set[str] = set(participant_order)
+            for _, _, dst_method_id in direct_calls:
+                dst_type_id = owner_type_by_method_id.get(dst_method_id, "")
+                if dst_type_id and dst_type_id not in seen_participants:
+                    seen_participants.add(dst_type_id)
+                    participant_order.append(dst_type_id)
 
-        for src_method_id, dst_method_id in chain:
-            src_type_id = owner_type_by_method_id.get(src_method_id, "")
-            dst_type_id = owner_type_by_method_id.get(dst_method_id, "")
-            if not src_type_id or not dst_type_id:
-                continue
+            lines.append('actor "User" as ACTOR')
+            for type_id in participant_order:
+                display = type_name_by_id.get(type_id, type_id)
+                lines.append(f'participant "{display}" as {_participant_alias(type_id)}')
 
-            dst_method_name = str(method_attrs_by_id.get(dst_method_id, {}).get("name") or "call")
-            msg = _safe_sequence_label(dst_method_name)
-            src_alias = _participant_alias(src_type_id)
-            dst_alias = _participant_alias(dst_type_id)
+            if participant_order:
+                lines.append("")
 
-            lines.append(f"{src_alias} -> {dst_alias} : {msg}")
+            if entry_type_id:
+                lines.append(f"ACTOR -> {_participant_alias(entry_type_id)} : {_safe_sequence_label(entry_method_name)}")
+                lines.append(f"activate {_participant_alias(entry_type_id)}")
+
+            grouped = _detect_conditional_calls(direct_calls)
+
+            main_calls = list(grouped["main"])
+            guard_idx = -1
+            for idx, (_, _, dst_method_id) in enumerate(main_calls):
+                method_name = str(method_attrs_by_id.get(dst_method_id, {}).get("name") or "")
+                if _is_predicate_call(method_name):
+                    guard_idx = idx
+                    break
+
+            if guard_idx >= 0 and guard_idx < len(main_calls) - 1:
+                for i in range(0, guard_idx):
+                    _, _, dst_method_id = main_calls[i]
+                    _emit_call_with_return(lines, entry_method_id, dst_method_id)
+
+                _, _, guard_dst_id = main_calls[guard_idx]
+                guard_name = str(method_attrs_by_id.get(guard_dst_id, {}).get("name") or "")
+                guard_true, guard_false = _infer_guard_labels(guard_name)
+                _emit_call_with_return(lines, entry_method_id, guard_dst_id)
+
+                lines.append(f"alt {guard_true}")
+                if entry_type_id:
+                    lines.append(f"{_participant_alias(entry_type_id)} --> ACTOR : failure")
+                    lines.append(f"deactivate {_participant_alias(entry_type_id)}")
+
+                lines.append(f"else {guard_false}")
+                for i in range(guard_idx + 1, len(main_calls)):
+                    _, _, dst_method_id = main_calls[i]
+                    _emit_call_with_return(lines, entry_method_id, dst_method_id)
+
+                for _, _, dst_method_id in grouped["if_block"]:
+                    _emit_call_with_return(lines, entry_method_id, dst_method_id)
+
+                if entry_type_id:
+                    lines.append(f"{_participant_alias(entry_type_id)} --> ACTOR : success")
+                    lines.append(f"deactivate {_participant_alias(entry_type_id)}")
+                lines.append("end")
+            else:
+                for _, _, dst_method_id in main_calls:
+                    _emit_call_with_return(lines, entry_method_id, dst_method_id)
+
+                if grouped["if_block"] or grouped["else_block"]:
+                    lines.append("alt success")
+                    for _, _, dst_method_id in grouped["if_block"]:
+                        _emit_call_with_return(lines, entry_method_id, dst_method_id)
+
+                    lines.append("else failure")
+                    for _, _, dst_method_id in grouped["else_block"]:
+                        _emit_call_with_return(lines, entry_method_id, dst_method_id)
+
+                    lines.append("end")
+
+                if entry_type_id:
+                    lines.append(f"{_participant_alias(entry_type_id)} --> ACTOR : result")
+                    lines.append(f"deactivate {_participant_alias(entry_type_id)}")
 
     else:
         # Fallback: create high-level interaction flow from type dependencies.
@@ -903,12 +1243,16 @@ def generate_sequence_diagram(cir: Dict[str, Any]) -> str:
 
         if compact_pairs:
             for src, dst in compact_pairs[:20]:
-                lines.append(
-                    f"{_participant_alias(src)} -> {_participant_alias(dst)} : uses()"
-                )
+                src_alias = _participant_alias(src)
+                dst_alias = _participant_alias(dst)
+                lines.append(f"{src_alias} -> {dst_alias} : uses()")
+                lines.append(f"activate {dst_alias}")
+                lines.append(f"deactivate {dst_alias}")
         elif participants:
             p = _participant_alias(participants[0])
+            lines.append(f"activate {p}")
             lines.append(f"{p} -> {p} : process()")
+            lines.append(f"deactivate {p}")
 
     lines.append("@enduml")
     return "\n".join(lines)
@@ -1036,17 +1380,17 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
         name = (type_name or "").lower()
         if any(k in name for k in ("repository", "repo", "dao", "store")):
             return "repository"
-        if any(k in name for k in ("database", "db", "connection")):
+        if any(k in name for k in ("database", "db", "connection","config")):
             return "database"
         if any(k in name for k in ("service", "manager", "facade", "interactor", "usecase")):
             return "service"
-        if any(k in name for k in ("util", "helper", "common", "shared")):
+        if any(k in name for k in ("util", "helper", "common","logger", "shared")):
             return "util"
         if any(k in name for k in ("model", "entity", "domain", "dto", "record", "vo", "student", "user")):
             return "model"
-        if any(k in name for k in ("security", "auth", "hasher", "crypto", "token", "encrypt")):
+        if any(k in name for k in ("security", "auth", "hasher", "crypto", "token", "encrypt","validator")):
             return "security"
-        if any(k in name for k in ("controller", "resource", "endpoint", "api", "handler", "rest")):
+        if any(k in name for k in ("controller", "resource", "endpoint", "api", "handler", "rest","gateway")):
             return "api"
         return "(root)"
 
@@ -1067,6 +1411,44 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
                 continue
 
         effective_package_of[tid] = raw_pkg
+
+    # Merge duplicate parser TypeDecls that represent the same logical component
+    # (same effective package + type name). This keeps component diagrams stable
+    # when CIR contains synthetic/duplicate type IDs across languages.
+    canonical_by_key: Dict[Tuple[str, str], str] = {}
+    canonical_for_tid: Dict[str, str] = {}
+    merged_type_nodes: Dict[str, Dict[str, Any]] = {}
+    merged_package_of: Dict[str, str] = {}
+
+    def _canonical_key_for_tid(tid: str) -> Tuple[str, str]:
+        pkg = effective_package_of.get(tid, "(default)")
+        nm = str(type_nodes.get(tid, {}).get("name", tid) or tid)
+        return (pkg, nm)
+
+    for tid in sorted(type_nodes.keys(), key=lambda t: str(type_nodes[t].get("name", t))):
+        key = _canonical_key_for_tid(tid)
+        if key not in canonical_by_key:
+            canonical_by_key[key] = tid
+            merged_type_nodes[tid] = type_nodes[tid]
+            merged_package_of[tid] = key[0]
+        canonical_for_tid[tid] = canonical_by_key[key]
+
+    type_nodes = merged_type_nodes
+    effective_package_of = merged_package_of
+
+    remapped_dep_edges: List[Tuple[str, str, str]] = []
+    seen_dep_edges: Set[Tuple[str, str, str]] = set()
+    for src_id, dst_id, etype in dep_edges:
+        src_c = canonical_for_tid.get(src_id, src_id)
+        dst_c = canonical_for_tid.get(dst_id, dst_id)
+        if src_c == dst_c:
+            continue
+        edge_key = (src_c, dst_c, etype)
+        if edge_key in seen_dep_edges:
+            continue
+        seen_dep_edges.add(edge_key)
+        remapped_dep_edges.append(edge_key)
+    dep_edges = remapped_dep_edges
 
     pkg_to_types: Dict[str, List[str]] = {}
     for tid in type_nodes:
@@ -1114,10 +1496,11 @@ def generate_component_diagram(cir: Dict[str, Any]) -> str:
         "",
     ]
 
-    use_root = bool(root_prefix) and len(all_pkgs) > 1
+    use_root = bool(type_nodes)
+    root_label = root_prefix if root_prefix else "System"
     indent = ""
     if use_root:
-        out.append(f'package "{root_prefix}" {{')
+        out.append(f'package "{root_label}" {{')
         indent = "  "
 
     def _pkg_sort(pkg: str) -> Tuple[int, str]:
@@ -1221,6 +1604,9 @@ def _is_scalar_return_type(raw_type: str) -> bool:
 
 
 def _is_lookup_like_method(method_name: str, raw_ret: str) -> bool:
+    # Collection methods should NOT be classified as lookups
+    if _is_collection_return_type(raw_ret):
+        return False
     n = (method_name or "").strip().lower()
     if _is_void_return_type(raw_ret) or _is_boolean_return_type(raw_ret) or _is_collection_return_type(raw_ret):
         return False
@@ -1267,10 +1653,29 @@ def _failure_label_for_entry(entry_method_name: str, return_type: str) -> str:
         return f"{name} failed (return false)"
     if _is_void_return_type(return_type):
         return f"{name} aborted"
+    if _is_collection_return_type(return_type):
+        return f"{name} failed (return empty list)"
     return f"{name} failed (return null)"
 
 
-def generate_activity_diagram(cir: Dict[str, Any]) -> str:
+def _continuation_message_for_entry(entry_method_name: str) -> str:
+    """Generate an appropriate continuation message based on the entry method."""
+    name = (entry_method_name or "operation").strip().lower()
+    
+    if "register" in name or "signup" in name or "enroll" in name:
+        return "Proceed with registration"
+    elif "create" in name or "add" in name or "insert" in name:
+        return "Proceed with creation"
+    elif "update" in name or "edit" in name or "modify" in name:
+        return "Proceed with update"
+    elif "delete" in name or "remove" in name:
+        return "Proceed with deletion"
+    elif "authenticate" in name or "login" in name:
+        return "Proceed with authentication"
+    else:
+        return "Proceed with operation"
+
+def generate_activity_diagram(cir: Dict[str, Any], entry_method_name: Optional[str] = None) -> str:
     nodes_by_id, edges = _index_cir(cir)
     type_nodes, _, methods_by_type = _extract_types_and_members(nodes_by_id, edges)
 
@@ -1339,6 +1744,26 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
 
     ordered_methods = sorted(method_candidates, key=_method_priority)
 
+    def _normalize_method_name(name: Optional[str]) -> str:
+        return re.sub(r"\s+", "", (name or "").strip().lower())
+
+    def _matches_entry_override(method_id: str, override_name: str) -> bool:
+        if not override_name:
+            return False
+
+        attrs = method_attrs_by_id.get(method_id, {})
+        method_name = _normalize_method_name(str(attrs.get("name") or ""))
+        if method_name == override_name:
+            return True
+
+        owner_id = owner_type_by_method_id.get(method_id, "")
+        owner_name = _normalize_method_name(type_name_by_id.get(owner_id, ""))
+        if owner_name and override_name in owner_name:
+            return True
+
+        qualified_name = _normalize_method_name(f"{type_name_by_id.get(owner_id, '')}.{attrs.get('name') or ''}")
+        return qualified_name == override_name or qualified_name.endswith(f".{override_name}")
+
     lines: List[str] = [
         "@startuml",
         "skinparam shadowing false",
@@ -1381,7 +1806,12 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
         lines.append("@enduml")
         return "\n".join(lines)
 
+    override_name = _normalize_method_name(entry_method_name)
     entry_method_id = ordered_methods[0]
+    if override_name:
+        matching_methods = [mid for mid in ordered_methods if _matches_entry_override(mid, override_name)]
+        if matching_methods:
+            entry_method_id = matching_methods[0]
 
     # Walk the dominant ordered CALLS chain.
     chain: List[str] = [entry_method_id]
@@ -1408,6 +1838,10 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
     used_lookup_branch = False
     used_boolean_branch = False
     used_collection_loop = False
+    
+    # Track which method in chain returns collection (for deferred loop emission)
+    collection_returning_method_idx: Optional[int] = None
+    collection_item_label_deferred: Optional[str] = None
 
     for mid in chain:
         m = method_attrs_by_id.get(mid, {})
@@ -1425,11 +1859,11 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
                 lines.append(f"  :{_failure_label_for_entry(entry_method_name, entry_return_type)};")
                 lines.append("  stop")
                 lines.append("else (not found)")
-                lines.append("  :Proceed with registration;")
+                lines.append(f"  :{_continuation_message_for_entry(entry_method_name)};")
                 lines.append("endif")
             else:
                 lines.append(f"if ({action_label} returned value?) then (found)")
-                lines.append("  :Proceed with retrieved entity;")
+                lines.append(f"  :{_continuation_message_for_entry(entry_method_name)};")
                 lines.append("else (not found)")
                 lines.append(f"  :{_failure_label_for_entry(entry_method_name, entry_return_type)};")
                 lines.append("  stop")
@@ -1448,11 +1882,20 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
             continue
 
         if not used_collection_loop and _is_collection_iteration_method(method_name, raw_ret):
-            item_label = _collection_item_label(raw_ret)
-            lines.append(f"while ({action_label} has more items?) is (yes)")
-            lines.append(f"  :Process {item_label};")
-            lines.append("endwhile (no)")
-            used_collection_loop = True
+            # DEFER collection loop emission: don't emit it here during chain traversal.
+            # Instead, mark this position and emit AFTER all actions complete.
+            # This ensures the loop follows all method calls, not preceding them.
+            owner_id = owner_type_by_method_id.get(mid, "")
+            entry_owner_id = owner_type_by_method_id.get(entry_method_id, "")
+            owner_name = type_name_by_id.get(owner_id, "").lower()
+            looks_like_repo = any(k in owner_name for k in ("repo", "repository", "dao", "store", "database"))
+
+            if owner_id != entry_owner_id or looks_like_repo or any(k in method_name.lower() for k in ("findall", "getall", "list")):
+                # Mark this method as the collection source, defer loop to end
+                collection_returning_method_idx = len(lines)
+                collection_item_label_deferred = _collection_item_label(raw_ret)
+                used_collection_loop = True
+            continue
 
     if not used_lookup_branch and not used_boolean_branch and len(chain) >= 2:
         # Fallback decision when we only have linear calls but no clear semantic guard.
@@ -1467,6 +1910,12 @@ def generate_activity_diagram(cir: Dict[str, Any]) -> str:
         lines.append(f"  :{_failure_label_for_entry(entry_method_name, entry_return_type)};")
         lines.append("  stop")
         lines.append("endif")
+
+    # NOW emit deferred collection loop AFTER all actions and guards complete
+    if collection_returning_method_idx is not None and collection_item_label_deferred:
+        lines.append(f"while (more items to process?) is (yes)")
+        lines.append(f"  :Process {collection_item_label_deferred};")
+        lines.append("endwhile (no)")
 
     lines.append("stop")
     lines.append("@enduml")

@@ -32,6 +32,7 @@ app.add_middleware(
 class UMLRegexRequest(BaseModel):
     cir: Dict[str, Any]
     diagram_type: str = "class"  # "class", "package", "sequence", "component", "activity"
+    entry_method_name: str | None = None
 
 
 class UMLRegexResponse(BaseModel):
@@ -54,11 +55,11 @@ def uml_regex(req: UMLRegexRequest):
     elif dt == "package":
         plantuml = generate_package_diagram(req.cir)
     elif dt == "sequence":
-        plantuml = generate_sequence_diagram(req.cir)
+        plantuml = generate_sequence_diagram(req.cir, req.entry_method_name)
     elif dt == "component":
         plantuml = generate_component_diagram(req.cir)
     elif dt == "activity":
-        plantuml = generate_activity_diagram(req.cir)
+        plantuml = generate_activity_diagram(req.cir, req.entry_method_name)
     else:
         raise HTTPException(
             status_code=400,
