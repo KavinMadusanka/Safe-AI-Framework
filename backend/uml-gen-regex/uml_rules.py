@@ -829,6 +829,21 @@ def generate_sequence_diagram(cir: Dict[str, Any], entry_method_name: Optional[s
     def _participant_alias(type_id: str) -> str:
         return "P_" + re.sub(r"[^a-zA-Z0-9_]", "_", type_id)
 
+    def _participant_keyword(type_id: str) -> str:
+        name = str(type_name_by_id.get(type_id, "")).lower()
+        package = str(type_package_by_id.get(type_id, "")).lower()
+        combined = f"{name} {package}"
+
+        if any(k in combined for k in ("controller", "resource", "endpoint", "rest", "handler")):
+            return "boundary"
+        if any(k in combined for k in ("service", "manager", "facade", "business", "interactor", "usecase")):
+            return "control"
+        if any(k in combined for k in ("repository", "repo", "dao", "database", "db", "persistence", "store")):
+            return "database"
+        if any(k in combined for k in ("entity", "model", "domain", "dto", "record", "vo")):
+            return "entity"
+        return "participant"
+
     def _normalize_method_name(name: Optional[str]) -> str:
         return re.sub(r"\s+", "", (name or "").strip().lower())
 
@@ -1135,7 +1150,8 @@ def generate_sequence_diagram(cir: Dict[str, Any], entry_method_name: Optional[s
             lines.append('actor "User" as ACTOR')
             for type_id in participant_order:
                 display = type_name_by_id.get(type_id, type_id)
-                lines.append(f'participant "{display}" as {_participant_alias(type_id)}')
+                keyword = _participant_keyword(type_id)
+                lines.append(f'{keyword} "{display}" as {_participant_alias(type_id)}')
 
             if participant_order:
                 lines.append("")
@@ -1252,7 +1268,8 @@ def generate_sequence_diagram(cir: Dict[str, Any], entry_method_name: Optional[s
 
         for type_id in participants:
             display = type_name_by_id.get(type_id, type_id)
-            lines.append(f'participant "{display}" as {_participant_alias(type_id)}')
+            keyword = _participant_keyword(type_id)
+            lines.append(f'{keyword} "{display}" as {_participant_alias(type_id)}')
 
         if participants:
             lines.append("")
