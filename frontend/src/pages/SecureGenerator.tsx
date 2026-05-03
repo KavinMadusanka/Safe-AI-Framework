@@ -9,7 +9,9 @@ import {
   CheckCircle2, MinusCircle, Shield, Sparkles,
   Copy, Check, Code2, ChevronDown, Zap, Clock, ArrowLeft,
   Network, Package, GitBranch, Boxes, Activity, Eye,
+  // FolderPlus,
 } from "lucide-react";
+// import AddToPluginModal from "../components/AddToPluginModal";
 
 /* ══════════════════════════════════════════════════════════════════════════
    Types
@@ -270,6 +272,7 @@ export default function SecureGenerator() {
   const [showOriginal, setShowOriginal] = useState(false);
   const [securityReportOpen, setSecurityReportOpen] = useState(false);
   const [sastOpen, setSastOpen]         = useState(false);
+  // const [pluginModalOpen, setPluginModalOpen] = useState(false);
 
   // UML modal
   const [umlOpen, setUmlOpen]       = useState(false);
@@ -549,6 +552,24 @@ export default function SecureGenerator() {
                       {copied ? <Check size={18} /> : <Copy size={18} />}
                     </button>
                   )}
+
+                  {/* Add Generated Code to System Button */}
+                  {/* {out?.code && (
+                  <button
+                    onClick={() => setPluginModalOpen(true)}
+                    title="Save this generated code as a plugin in the core system"
+                    style={{
+                      padding: "14px 20px", borderRadius: 10, border: "none",
+                      background: "linear-gradient(135deg,#4F0C87,#7c3aed)",
+                      color: "#ffffff", fontSize: 14, fontWeight: 600,
+                      cursor: "pointer", display: "flex", alignItems: "center", gap: 8,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    <FolderPlus size={18} />
+                    Add to System
+                  </button>
+                )} */}
                 </div>
               </div>
 
