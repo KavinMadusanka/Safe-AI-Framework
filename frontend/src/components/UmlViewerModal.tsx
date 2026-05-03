@@ -191,9 +191,9 @@ function ZoomableDiagram({
           alignItems: "center",
           gap: 6,
           padding: "6px 10px",
-          background: "#f8fafc",
+          background: "#FAF5FF",
           borderRadius: 8,
-          border: "1px solid #e2e8f0",
+          border: "1px solid #E9D5FF",
           marginLeft: "auto",
         }}>
           <button
@@ -260,7 +260,7 @@ function ZoomableDiagram({
         />
       </div>
 
-      <div style={{ fontSize: 11, color: "#94a3b8", textAlign: "center" }}>
+      <div style={{ fontSize: 11, color: "#5B21B6", textAlign: "center" }}>
         Scroll to zoom · drag to pan · click Reset to fit
       </div>
     </div>
@@ -274,10 +274,10 @@ function zoomBtnStyle(disabled: boolean): React.CSSProperties {
     justifyContent: "center",
     width: 28,
     height: 28,
-    border: "1px solid #e2e8f0",
+    border: "1px solid #E9D5FF",
     borderRadius: 6,
-    background: disabled ? "#f1f5f9" : "#ffffff",
-    color: disabled ? "#cbd5e1" : "#475569",
+    background: disabled ? "#F3E8FF" : "#ffffff",
+    color: disabled ? "#D6BCFA" : "#5B21B6",
     cursor: disabled ? "not-allowed" : "pointer",
     padding: 0,
   };
@@ -570,13 +570,13 @@ export default function UmlViewerModal({
                 width: 34,
                 height: 34,
                 borderRadius: 10,
-                background: "#e0f2fe",
+                background: "#cebaf0",
                 display: "grid",
                 placeItems: "center",
-                border: "1px solid #bae6fd",
+                border: "1px solid #5B21B6",
               }}
             >
-              <Eye size={18} color="#0369a1" />
+              <Eye size={18} color="#5B21B6" />
             </div>
 
             <div>
@@ -594,10 +594,10 @@ export default function UmlViewerModal({
             <div
               style={{
                 display: "inline-flex",
-                border: "1px solid #e2e8f0",
+                border: "1px solid #E9D5FF",
                 borderRadius: 999,
                 overflow: "hidden",
-                background: "#f8fafc",
+                background: "#FAF5FF",
               }}
             >
               <button
@@ -606,8 +606,8 @@ export default function UmlViewerModal({
                   padding: "8px 12px",
                   border: "none",
                   cursor: "pointer",
-                  background: effectiveSource === "rule" ? "#e0f2fe" : "transparent",
-                  color: effectiveSource === "rule" ? "#0369a1" : "#475569",
+                  background: effectiveSource === "rule" ? "rgb(232, 221, 235)" : "transparent",
+                  color: effectiveSource === "rule" ? "#110c13" : "#475569",
                   fontWeight: 700,
                   fontSize: 12,
                 }}
@@ -630,7 +630,7 @@ export default function UmlViewerModal({
                   border: "none",
                   cursor: !canGenerateAi ? "not-allowed" : "pointer",
                   background: effectiveSource === "ai" ? "#dcfce7" : "transparent",
-                  color: effectiveSource === "ai" ? "#166534" : "#475569",
+                  color: effectiveSource === "ai" ? "#166534" : "#684769",
                   fontWeight: 700,
                   fontSize: 12,
                   opacity: !canGenerateAi ? 0.5 : 1,
@@ -645,10 +645,12 @@ export default function UmlViewerModal({
             {(tab === "sequence" || tab === "activity") && (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <input
-                  placeholder="entry method "
+                  placeholder="Entry method"
+                  aria-label="Entry method override"
                   value={entryMethod}
                   onChange={(e) => setEntryMethod(e.target.value)}
-                  style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #e2e8f0", fontSize: 12 }}
+                  onBlur={() => setEntryMethod((s) => s.trim())}
+                  style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #e2e8f0", fontSize: 12, width: 180, background: "white", color: "#0f172a" }}
                 />
                 <button
                   onClick={() => void regenerateRuleDiagram(tab, entryMethod)}
@@ -683,7 +685,7 @@ export default function UmlViewerModal({
                 border: "1px solid #e2e8f0",
                 background: "#ffffff",
                 cursor: "pointer",
-                color: "#475569",
+                color: "#d5a2f3",
                 padding: 8,
                 borderRadius: 10,
                 display: "flex",
@@ -781,21 +783,30 @@ export default function UmlViewerModal({
         </div>
 
         {/* ── Content ── */}
-        <div style={{ padding: 16, flex: 1, overflow: "hidden", background: "#f8fafc", display: "flex", flexDirection: "column" }}>
-          {activeSvg ? (
-            <DiagramCard
-              title={`${effectiveSource === "ai" ? "AI" : "Rule"} • ${tab.toUpperCase()} Diagram`}
-              svg={activeSvg}
-              containerRef={svgContainerRef}
-            />
-          ) : effectiveSource === "rule" ? (
-            <ValidationCard title={`${tab.toUpperCase()} Diagram`} info={vinfo(tab)} />
-          ) : (
-            <EmptyCard
-              title={`${tab.toUpperCase()} Diagram (AI)`}
-              message={aiLoading ? "Generating AI diagram..." : "Click AI-based toggle to generate this tab."}
-            />
-          )}
+        <div style={{ padding: 16, flex: 1, overflow: "hidden", background: "#FAF5FF", display: "flex", flexDirection: "column" }}>
+          <>
+            {activeSvg ? (
+              <DiagramCard
+                title={`${effectiveSource === "ai" ? "AI" : "Rule"} • ${tab.toUpperCase()} Diagram`}
+                svg={activeSvg}
+                containerRef={svgContainerRef}
+              />
+            ) : effectiveSource === "rule" ? (
+              <ValidationCard title={`${tab.toUpperCase()} Diagram`} info={vinfo(tab)} />
+            ) : (
+              <EmptyCard
+                title={`${tab.toUpperCase()} Diagram (AI)`}
+                message={aiLoading ? "Generating AI diagram..." : "Click AI-based toggle to generate this tab."}
+              />
+            )}
+
+            {(tab === "sequence" || tab === "activity") && (
+              <div style={{ marginTop: 10, fontSize: 12, color: "#64748b" }}>
+                Hint: enter an optional entry method (e.g. <code>main</code>, <code>init</code>, or a handler name) in the box above
+                and click <strong>Apply</strong> to focus the {tab} diagram. Leave blank to use detected entry points.
+              </div>
+            )}
+          </>
         </div>
 
         <style>{`
@@ -872,7 +883,7 @@ function DownloadMenu({ onDownload }: { onDownload: (fmt: "svg" | "png") => void
           >
             <span style={{ fontSize: 16 }}>🖼</span>
             <div>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#0f172a" }}>SVG</div>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#270f2a" }}>SVG</div>
               <div style={{ fontSize: 11, color: "#94a3b8" }}>Vector · scales perfectly</div>
             </div>
           </button>
@@ -923,9 +934,9 @@ function TabButton({
       style={{
         padding: "8px 14px",
         borderRadius: 999,
-        border: active ? "1px solid #0ea5e9" : "1px solid #cbd5e1",
-        background: active ? "#e0f2fe" : "#ffffff",
-        color: active ? "#0369a1" : "#475569",
+        border: active ? "1px solid #7C3AED" : "1px solid #cbd5e1",
+        background: active ? "#F3E8FF" : "#ffffff",
+        color: active ? "#5B21B6" : "#475569",
         fontSize: 13,
         fontWeight: 600,
         cursor: disabled ? "not-allowed" : "pointer",

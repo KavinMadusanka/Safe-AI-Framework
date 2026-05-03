@@ -1337,6 +1337,13 @@ def _fix_activity_diagram(plantuml: str) -> str:
     return "\n".join(result)
 
 
+def _fix_sequence_returns(plantuml: str) -> str:
+    # placeholder to satisfy static analysis at module load time.
+    # The real implementation is defined later in this file and will
+    # override this at import time.
+    return plantuml
+
+
 def _post_process(plantuml: str, diagram_type: str, known_fqns: list = None) -> str:
     dt = (diagram_type or "class").lower().strip()
 
@@ -1373,6 +1380,10 @@ def _post_process(plantuml: str, diagram_type: str, known_fqns: list = None) -> 
             needed.append("skinparam shadowing false")
         if needed:
             plantuml = _inject_after_startuml(plantuml, needed)
+        # Ensure return arrows (Callee --> Caller) appear immediately before
+        # the callee's corresponding deactivate line. Some LLM outputs place
+        # return arrows too early; enforce a deterministic placement here.
+        plantuml = _fix_sequence_returns(plantuml)
 
     elif dt == "component":
         needed = []

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional, Dict, Any
 
-import requests
+import requests # type: ignore
 from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from pydantic import BaseModel  # type: ignore
