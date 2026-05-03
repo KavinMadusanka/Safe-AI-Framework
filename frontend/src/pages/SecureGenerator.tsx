@@ -161,16 +161,73 @@ function generateId() {
 }
 
 async function saveToHistory(prompt: string, result: ApiResult): Promise<void> {
-  const umlData = result.report?.uml;
+  const umlData   = result.report?.uml;
+  const semgrep   = result.report?.semgrep;
+  const dast      = result.report?.dast;
+  const dastLlm   = result.report?.dast_llm_fix;
+  const fixSum    = result.report?.fix_summary;
+ 
+  // ── Build SAST report snapshot ────────────────────────────────────────────
+  const sast_report = semgrep ? {
+    initial_findings:  semgrep.initial_findings ?? 0,
+    semgrep_fixed:     semgrep.fixes_applied ?? 0,
+    llm_fixed:         fixSum?.llm_fixed ?? 0,
+    remaining_issues:  fixSum?.remaining_issues ?? 0,
+    fix_rate_percent:  fixSum?.fix_rate_percent ?? (
+      (semgrep.initial_findings ?? 0) === 0 ? 100 : 0
+    ),
+    packs:     semgrep.packs ?? [],
+    languages: semgrep.languages ?? [],
+    categorized_findings: {
+      initially_auto_fixable: semgrep.categorized_findings?.initially_auto_fixable ?? [],
+      initially_manual_only:  semgrep.categorized_findings?.initially_manual_only  ?? [],
+    },
+  } : undefined;
+ 
+  // ── Build DAST report snapshot ────────────────────────────────────────────
+  const dastSummary = dast?.summary;
+  const llmFixed    = dastLlm?.fixed === true ? (dastLlm?.fixes_applied ?? 0) : 0;
+ 
+  const dast_report = dast?.ok ? {
+    ok:               dast.ok,
+    docker_available: dast.docker_available,
+    total:            dastSummary?.total    ?? 0,
+    critical:         dastSummary?.critical ?? 0,
+    high:             dastSummary?.high     ?? 0,
+    medium:           dastSummary?.medium   ?? 0,
+    low:              dastSummary?.low      ?? 0,
+    owasp_coverage:   dastSummary?.owasp_coverage ?? [],
+    pattern_count:    dast.pattern_findings?.length ?? 0,
+    runtime_count:    dast.runtime_findings?.length ?? 0,
+    languages:        dast.languages ?? [],
+    llm_fixed:        llmFixed,
+    llm_fix_applied:  llmFixed > 0,
+    // Store findings (cap at 50 to keep localStorage small)
+    findings: (dast.findings ?? []).slice(0, 50).map((f) => ({
+      check_id:  f.check_id,
+      severity:  f.severity,
+      message:   f.message,
+      owasp:     f.owasp,
+      cwe:       f.cwe ?? null,
+      line:      f.line ?? null,
+      file:      f.file ?? null,
+      fix_hint:  f.fix_hint ?? null,
+      source:    f.source,
+    })),
+  } : undefined;
+ 
+  // ── Assemble full history entry ───────────────────────────────────────────
   const entry: HistoryEntry = {
     id:            generateId(),
     timestamp:     new Date().toISOString(),
     prompt,
     code:          result.code,
     original_code: result.original_code,
-    fix_summary:   result.report?.fix_summary,
-    languages:     result.report?.semgrep?.languages,
+    fix_summary:   fixSum,
+    languages:     semgrep?.languages,
     decision:      result.decision,
+    sast_report,   // ← NEW
+    dast_report,   // ← NEW
     uml: umlData ? {
       class_svg:        umlData.class_svg,
       package_svg:      umlData.package_svg,
@@ -184,6 +241,7 @@ async function saveToHistory(prompt: string, result: ApiResult): Promise<void> {
       ai_activity_svg:  umlData.ai_activity_svg,
     } : undefined,
   };
+ 
   try {
     await fetch(HISTORY_API, {
       method:  "POST",
@@ -269,13 +327,68 @@ export default function SecureGenerator() {
       ai_activity_svg:  entry.uml.ai_activity_svg,
     } : undefined;
 
+    // ── Rebuild Semgrep report from sast_report snapshot ──────────────────────
+  const sast = entry.sast_report;
+  const restoredSemgrep: SemgrepReport | undefined = sast ? {
+    ok:                  true,
+    initial_findings:    sast.initial_findings ?? 0,
+    final_findings:      sast.remaining_issues ?? 0,
+    fixes_applied:       sast.semgrep_fixed ?? 0,
+    autofix_applied:     (sast.semgrep_fixed ?? 0) > 0,
+    auto_fixable_count:  sast.semgrep_fixed ?? 0,
+    manual_only_count:   sast.llm_fixed ?? 0,
+    packs:               sast.packs ?? [],
+    languages:           sast.languages ?? [],
+    file_count:          0,
+    categorized_findings: {
+      initially_auto_fixable: sast.categorized_findings?.initially_auto_fixable ?? [],
+      initially_manual_only:  sast.categorized_findings?.initially_manual_only  ?? [],
+      still_remaining:        [],
+      remaining_needs_llm:    [],
+    },
+  } : { languages: entry.languages };
+ 
+  // ── Rebuild DAST report from dast_report snapshot ─────────────────────────
+  const dastSnap = entry.dast_report;
+  const restoredDast: DastReport | undefined = dastSnap ? {
+    ok:               dastSnap.ok ?? true,
+    docker_available: dastSnap.docker_available ?? false,
+    findings:         (dastSnap.findings ?? []) as DastReport["findings"],
+    pattern_findings: (dastSnap.findings ?? []).filter(
+      f => f.source === "pattern_scan"
+    ) as DastReport["findings"],
+    runtime_findings: (dastSnap.findings ?? []).filter(
+      f => f.source === "docker_execution"
+    ) as DastReport["findings"],
+    execution_results: [],
+    proof_of_executions: [],
+    languages: dastSnap.languages ?? [],
+    summary: {
+      total:           dastSnap.total    ?? 0,
+      critical:        dastSnap.critical ?? 0,
+      high:            dastSnap.high     ?? 0,
+      medium:          dastSnap.medium   ?? 0,
+      low:             dastSnap.low      ?? 0,
+      docker_executed: dastSnap.docker_available ?? false,
+      owasp_coverage:  dastSnap.owasp_coverage ?? [],
+    },
+  } : undefined;
+ 
+  // ── Rebuild dast_llm_fix so DastPanel shows the fix banner ────────────────
+  const restoredDastLlmFix = dastSnap?.llm_fix_applied ? {
+    fixed:         true,
+    fixes_applied: dastSnap.llm_fixed ?? 0,
+  } : undefined;
+
     setOut({
       code:          entry.code,
       original_code: entry.original_code,
       decision:      entry.decision,
       report: {
         fix_summary: entry.fix_summary,
-        semgrep:     { languages: entry.languages },
+        semgrep:       restoredSemgrep,
+        dast:          restoredDast,
+        dast_llm_fix:  restoredDastLlmFix,
         uml:         restoredUml,
       } as Report,
     });
