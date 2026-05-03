@@ -4,8 +4,10 @@ import { useState, useCallback } from "react";
 import {
   Copy, Check, FileCode, ChevronRight,
   FolderOpen, Plug, CheckCircle2, X, Terminal,
-  Package, Code2, FileText, Layers,
+  Package, Code2, FileText, Layers, FolderPlus,
 } from "lucide-react";
+
+import AddToPluginModal from "./AddToPluginModal";
 
 /* ══════════════════════════════════════════════════════════════════════════
    Types
@@ -534,6 +536,8 @@ function CodePane({ file }: { file: ParsedFile }) {
   const lines = file.content.split("\n");
   const { Icon, color } = fileIconMeta(file.path);
 
+  const [pluginModalOpen, setPluginModalOpen] = useState(false);
+
   const handleCopy = async () => {
     await navigator.clipboard.writeText(file.content);
     setCopied(true);
@@ -567,6 +571,21 @@ function CodePane({ file }: { file: ParsedFile }) {
         >
           {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy</>}
         </button>
+
+        {/* Add to System button */}
+        <button
+          onClick={() => setPluginModalOpen(true)}
+          title={`Add ${file.path} to the plugin system`}
+          style={{
+            padding: "4px 10px", borderRadius: 6, border: "none",
+            background: "linear-gradient(135deg,#4F0C87,#7c3aed)",
+            color: "#fff", fontSize: 11, fontWeight: 600,
+            cursor: "pointer", display: "flex", alignItems: "center", gap: 5,
+          }}
+        >
+          <FolderPlus size={11} />
+          Add to System
+        </button>
       </div>
 
       {/* Code body with line numbers */}
@@ -594,6 +613,12 @@ function CodePane({ file }: { file: ParsedFile }) {
           </tbody>
         </table>
       </div>
+      
+      <AddToPluginModal
+        open={pluginModalOpen}
+        code={file.content}
+        onClose={() => setPluginModalOpen(false)}
+      />
     </div>
   );
 }

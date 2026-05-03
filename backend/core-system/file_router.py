@@ -37,18 +37,19 @@ def create_folder(data: dict):
 @router.post("/core/create-file")
 def create_file(data: dict):
     path = data.get("path")
-
+ 
     if not path:
         raise HTTPException(status_code=400, detail="Path required")
-
+ 
     full_path = safe_path(path)
-
+ 
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
-
-    content: str = data.get("content", "") or ""
+ 
+    # Accept optional initial content (e.g. page template for .js/.tsx files)
+    content = data.get("content", "") or ""
     content = content.replace("\r\n", "\n").replace("\r", "\n")
-
-    with open(full_path, "w") as f:
-        f.write("")
-
+ 
+    with open(full_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(content)
+ 
     return {"message": "File created"}

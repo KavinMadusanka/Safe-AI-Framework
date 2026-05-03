@@ -630,29 +630,22 @@ async function onStopPlugin(name?: string) {
 
   // create file function
   async function createNewFile() {
-    const name = prompt("Enter file name (e.g. Newpage.js):");
+    const name = prompt("Enter file name (e.g. AboutPage.tsx):");
     if (!name) return;
  
     const fullPath = cwd ? `${cwd}/${name}` : name;
- 
-    // Derive the component name from the filename, strip extension
     const componentName = name.replace(/\.[^.]+$/, "");
- 
-    // Give the template to .js / .jsx / .tsx files
     const isJsLike = /\.(js|jsx|tsx)$/i.test(name);
     const initialContent = isJsLike ? buildPageTemplate(componentName) : "";
  
     try {
-      // Step 1 — create the file on disk (empty or with content)
-      await axios.post(
-        `${API}/core/create-file`,
-        { path: fullPath, content: initialContent },
-      );
+      // Step 1 - create the file
+      await axios.post(`${API}/core/create-file`, {
+        path: fullPath,
+        content: initialContent,
+      });
  
-      // Step 2 — if it's a JS-like file, immediately persist the template
-      //           via /core/save so it survives without a manual Save press.
-      //           We call save directly here instead of relying on saveFile()
-      //           because React state (editorValue / openPath) hasn't updated yet.
+      // Step 2 - immediately save the template so it persists without manual Save
       if (isJsLike && initialContent) {
         const normalised = initialContent.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
         await axios.post(`${API}/core/save`, normalised, {
@@ -661,7 +654,7 @@ async function onStopPlugin(name?: string) {
         });
       }
  
-      // Step 3 — refresh the file tree and open the file in the editor
+      // Step 3 - refresh tree and open file in editor
       await loadTree(cwd);
       if (isJsLike) {
         setOpenPath(fullPath);
@@ -672,6 +665,7 @@ async function onStopPlugin(name?: string) {
       alert(err?.response?.data?.detail ?? "Failed to create file");
     }
   }
+ 
 
   function buildPageTemplate(componentName: string): string {
   return `import React, { useEffect, useState } from "react";

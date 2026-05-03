@@ -226,6 +226,7 @@ def core_save(
         raise HTTPException(404, detail="No project uploaded")
     fpath = _safe_join(PROJECT_DIR, path)
     fpath.parent.mkdir(parents=True, exist_ok=True)
+    # Normalise line endings — fixes the extra blank line bug
     normalised = content.replace("\r\n", "\n").replace("\r", "\n")
     fpath.write_text(normalised, encoding="utf-8")
     return {"ok": True, "path": path}
@@ -301,9 +302,7 @@ def create_plugin(
     dest = _safe_join(PLUGINS_DIR, path)
     dest.parent.mkdir(parents=True, exist_ok=True)
  
-    # ── Auto-transform entry.js to runner format ──────────────────────────
-    # Only transform files named "entry.js" (or any *.js that isn't a
-    # manifest/cert file).  manifest.json and cert/* are passed through as-is.
+    # Auto-transform entry.js files to runner format
     final_content = content
     was_transformed = False
  
@@ -313,21 +312,16 @@ def create_plugin(
             from plugin_transformer import transform_plugin_entry
             final_content, was_transformed = transform_plugin_entry(content, filename)
             if was_transformed:
-                log.info(
-                    "[PLUGIN/NEW] Auto-transformed '%s' from React/JSX to runner format", path
-                )
+                log.info("[PLUGIN/NEW] Auto-transformed '%s'", path)
         except Exception as exc:
-            # Non-fatal: if transformation fails, save the original and warn
-            log.warning(
-                "[PLUGIN/NEW] Transformation failed for '%s', saving original: %s", path, exc
-            )
+            log.warning("[PLUGIN/NEW] Transformation failed for '%s': %s", path, exc)
             final_content = content
-            was_transformed = False
  
+    # Normalise line endings
+    final_content = final_content.replace("\r\n", "\n").replace("\r", "\n")
     dest.write_text(final_content, encoding="utf-8")
  
-    # ── Auto-issue certificate when plugin becomes complete ───────────────
-    # A plugin is "complete" when its directory contains manifest.json.
+    # Auto-issue certificate when plugin becomes complete
     parts = Path(path).parts
     if len(parts) >= 1:
         slug = parts[0]
@@ -335,11 +329,7 @@ def create_plugin(
         if (plugin_dir / "manifest.json").exists():
             _issue_and_store_plugin_cert(slug)
  
-    return {
-        "ok": True,
-        "path": str(dest.relative_to(PROJECT_DIR)),
-        "transformed": was_transformed,
-    }
+    return {"ok": True, "path": str(dest.relative_to(PROJECT_DIR)), "transformed": was_transformed}
 
 @app.get("/core/plugins")
 def list_plugins():
