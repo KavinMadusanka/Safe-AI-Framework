@@ -752,6 +752,198 @@ def _summarize_component(
     return "\n".join(lines)
 
 
+def _summarize_sequence(
+    type_info: Dict[str, Any],
+    type_names: Dict[str, str],
+    nodes_by_id: Dict[str, Any],
+    edges: List[Dict[str, Any]],
+    outgoing: DefaultDict[str, List[Tuple[str, str]]],
+) -> str:
+    lines: List[str] = ["SEQUENCE DIAGRAM CONTEXT", ""]
+
+    methods_by_type: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
+    method_owner: Dict[str, str] = {}
+    method_attrs: Dict[str, Dict[str, Any]] = {}
+    params_by_method: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+    for type_id in type_info.keys():
+        for etype, method_id in outgoing.get(type_id, []):
+            if etype != "HAS_METHOD":
+                continue
+            mn = nodes_by_id.get(method_id)
+            if not mn:
+                continue
+            attrs = dict(mn.get("attrs", {}))
+            attrs["_id"] = method_id
+            methods_by_type[type_id].append(attrs)
+            method_owner[method_id] = type_id
+            method_attrs[method_id] = attrs
+
+    for node_id, node in nodes_by_id.items():
+        if node.get("kind") != "Parameter":
+            continue
+        for etype, dst in outgoing.get(node_id, []):
+            if etype == "PARAM_OF":
+                params_by_method[dst].append(dict(node.get("attrs", {})))
+
+    active_type_ids: Set[str] = set()
+    for tid in type_info.keys():
+        tname = type_names.get(tid, tid)
+        pkg = _get(type_info[tid], "package", default="")
+        ms = methods_by_type.get(tid, [])
+        if _is_entry_or_demo_type(tname):
+            continue
+        # For sequence diagrams, be INCLUSIVE of all services (even utilities like PasswordHasher, TokenService)
+        # Only filter entry/demo types and pure models; let LLM decide what to use based on CALLS edges
+        if _is_pure_model(tname, pkg, ms):
+            continue
+        active_type_ids.add(tid)
+
+    if not active_type_ids:
+        active_type_ids = set(type_info.keys())
+
+    def _participant_kind(type_id: str) -> str:
+        name = type_names.get(type_id, type_id)
+        pkg = _get(type_info.get(type_id, {}), "package", default="")
+        combined = (name + " " + pkg).lower()
+        if any(k in combined for k in ("controller", "resource", "endpoint", "rest", "handler", "route")):
+            return "boundary"
+        if any(k in combined for k in ("service", "manager", "interactor", "usecase", "facade", "business")):
+            return "control"
+        if any(k in combined for k in ("dao", "repository", "repo", "database", "db", "store", "gateway")):
+            return "database"
+        return "participant"
+
+    call_rows: List[Tuple[int, str, str, str, str]] = []
+    incoming_count: DefaultDict[str, int] = defaultdict(int)
+    outgoing_count: DefaultDict[str, int] = defaultdict(int)
+
+    for e in edges:
+        if _s(e.get("type")) != "CALLS":
+            continue
+        src_m = _s(e.get("src"))
+        dst_m = _s(e.get("dst"))
+        src_t = method_owner.get(src_m)
+        dst_t = method_owner.get(dst_m)
+        if not src_t or not dst_t:
+            continue
+        if src_t not in active_type_ids or dst_t not in active_type_ids:
+            continue
+        if src_t == dst_t:
+            continue
+
+        attrs = e.get("attrs") or {}
+        raw_order = attrs.get("order", 0)
+        try:
+            order = int(raw_order)
+        except Exception:
+            order = 0
+
+        call_rows.append((order, src_t, src_m, dst_t, dst_m))
+        outgoing_count[src_t] += 1
+        incoming_count[dst_t] += 1
+
+    call_rows.sort(key=lambda x: (x[0], type_names.get(x[1], x[1]), type_names.get(x[3], x[3])))
+
+    if not call_rows:
+        syn_idx = 0
+        for e in edges:
+            etype = _s(e.get("type"))
+            if etype not in ("DEPENDS_ON", "ASSOCIATES"):
+                continue
+            src_t = _s(e.get("src"))
+            dst_t = _s(e.get("dst"))
+            if src_t not in active_type_ids or dst_t not in active_type_ids:
+                continue
+            if src_t == dst_t:
+                continue
+            call_rows.append((10000 + syn_idx, src_t, "", dst_t, ""))
+            outgoing_count[src_t] += 1
+            incoming_count[dst_t] += 1
+            syn_idx += 1
+
+    entry_types = [
+        tid for tid in active_type_ids
+        if outgoing_count.get(tid, 0) > 0 and incoming_count.get(tid, 0) == 0
+    ]
+
+    if not entry_types and call_rows:
+        entry_types = [call_rows[0][1]]
+
+    def _sort_type_key(tid: str) -> Tuple[int, str]:
+        return (
+            _layer_order(type_names.get(tid, tid), _get(type_info.get(tid, {}), "package", default="")),
+            type_names.get(tid, tid).lower(),
+        )
+
+    participants_ordered = sorted(active_type_ids, key=_sort_type_key)
+    participant_set = set(participants_ordered)
+    ordered_with_entry: List[str] = []
+    for tid in sorted(set(entry_types), key=_sort_type_key):
+        if tid in participant_set and tid not in ordered_with_entry:
+            ordered_with_entry.append(tid)
+    for tid in participants_ordered:
+        if tid not in ordered_with_entry:
+            ordered_with_entry.append(tid)
+
+    lines.append("PARTICIPANTS (declare each participant exactly once):")
+    lines.append('  actor "User" as User')
+    for tid in ordered_with_entry:
+        pname = type_names.get(tid, tid)
+        pkind = _participant_kind(tid)
+        lines.append(f'  {pkind} "{pname}" as {pname}')
+
+    lines.append("")
+    lines.append("CALL CHAIN (ordered):")
+
+    if ordered_with_entry:
+        lines.append(f"- User -> {type_names.get(ordered_with_entry[0], ordered_with_entry[0])} : request")
+
+    for _, src_t, _src_m, dst_t, dst_m in call_rows:
+        src_name = type_names.get(src_t, src_t)
+        dst_name = type_names.get(dst_t, dst_t)
+
+        method_name = _s((method_attrs.get(dst_m) or {}).get("name")) or "call"
+        ret_raw = _s((method_attrs.get(dst_m) or {}).get("raw_return_type")) or _s((method_attrs.get(dst_m) or {}).get("return_type"))
+        ret = _clean_type_short(ret_raw) or "void"
+
+        params: List[str] = []
+        for p in params_by_method.get(dst_m, []):
+            pname = _s(p.get("name"))
+            ptype = _clean_type_short(_s(p.get("raw_type") or p.get("type_name")))
+            if pname and ptype:
+                params.append(f"{pname}: {ptype}")
+            elif pname:
+                params.append(pname)
+
+        param_sig = ", ".join(params[:3])
+        if len(params) > 3:
+            param_sig += ", ..."
+
+        extra = ""
+        lower_ret = ret.lower()
+        if lower_ret in ("bool", "boolean"):
+            extra = " [BOOLEAN]"
+        elif any(k in lower_ret for k in ("list", "array", "set", "collection", "iterable")):
+            extra = " [LIST]"
+
+        lines.append(
+            f"- {src_name} -> {dst_name} : {method_name}({param_sig}) returns {ret}{extra}"
+        )
+
+    if not call_rows:
+        lines.append("- (No CALLS edges found in CIR; inferred only from type dependencies)")
+
+    lines.append("")
+    lines.append("SEQUENCE RULES:")
+    lines.append("  - Keep participant declarations unique (no duplicate aliases).")
+    lines.append("  - Use activate/deactivate around every call/return pair.")
+    lines.append("  - Keep call order exactly as listed above.")
+    lines.append("  - Do not include model/entity/DTO types as participants.")
+
+    return "\n".join(lines)
+
+
 def _summarize_activity(
     type_info: Dict[str, Any],
     type_names: Dict[str, str],
@@ -1239,6 +1431,7 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
     dt = diagram_type.lower().strip()
     is_class_diagram     = dt in ("class", "class diagram", "class_diagram")
     is_package_diagram   = dt in ("package", "package diagram")
+    is_sequence_diagram  = dt in ("sequence", "sequence diagram")
     is_component_diagram = dt in ("component", "component diagram")
     is_activity_diagram  = dt in ("activity", "activity diagram")
 
@@ -1247,6 +1440,9 @@ def summarize_cir_for_llm(cir: Dict[str, Any], diagram_type: str) -> str:
 
     if is_component_diagram:
         return _summarize_component(type_info, type_names, edges, outgoing, nodes_by_id)
+
+    if is_sequence_diagram:
+        return _summarize_sequence(type_info, type_names, nodes_by_id, edges, outgoing)
 
     if is_activity_diagram:
         return _summarize_activity(type_info, type_names, nodes_by_id, edges, outgoing)
