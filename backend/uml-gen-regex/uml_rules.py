@@ -608,6 +608,15 @@ def generate_package_diagram(cir: Dict[str, Any]) -> str:
                 return True
         return False
 
+    def _package_alias(package_name: str, index: int) -> str:
+        safe = re.sub(r"[^0-9A-Za-z_]+", "_", package_name or "pkg")
+        safe = re.sub(r"_+", "_", safe).strip("_")
+        if not safe:
+            safe = "pkg"
+        if safe[0].isdigit():
+            safe = f"pkg_{safe}"
+        return f"pkg_{safe}_{index}"
+
     for type_id, attrs in type_nodes.items():
         type_name = attrs.get("name", type_id)
         has_main_entry_method = any(
@@ -728,6 +737,10 @@ def generate_package_diagram(cir: Dict[str, Any]) -> str:
         root_prefix = ".".join(common)
 
     is_single_file_diagram = _is_single_file_cir()
+    package_alias_by_name: Dict[str, str] = {
+        pkg: _package_alias(pkg, idx)
+        for idx, pkg in enumerate(sorted(package_to_types.keys()))
+    }
 
     if package_to_types:
         lines.append("")
@@ -741,9 +754,10 @@ def generate_package_diagram(cir: Dict[str, Any]) -> str:
         lines.append(f'package "{root_label}" {{')
 
     for package_name in sorted(package_to_types.keys()):
+        package_alias = package_alias_by_name[package_name]
         package_indent = "  " if is_single_file_diagram else ""
         type_indent = "    " if is_single_file_diagram else "  "
-        lines.append(f'{package_indent}package "{package_name}" {{')
+        lines.append(f'{package_indent}package "{package_name}" as {package_alias} {{')
         for type_decl in sorted(package_to_types[package_name]):
             lines.append(f"{type_indent}{type_decl}")
         lines.append(f"{package_indent}}}")
@@ -756,7 +770,9 @@ def generate_package_diagram(cir: Dict[str, Any]) -> str:
     for src_pkg, dst_pkg in sorted(package_dependency_pairs):
         if src_pkg not in package_to_types or dst_pkg not in package_to_types:
             continue
-        lines.append(f'"{src_pkg}" ..> "{dst_pkg}" : depends')
+        lines.append(
+            f"{package_alias_by_name[src_pkg]} ..> {package_alias_by_name[dst_pkg]} : depends"
+        )
 
     lines.append("@enduml")
     return "\n".join(lines)
