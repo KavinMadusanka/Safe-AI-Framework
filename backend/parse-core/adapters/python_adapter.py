@@ -71,10 +71,8 @@ def wrap_bare_functions_as_class(
     source_file: Optional[str] = None,
 ) -> str:
     """
-    FIX v2: If code has top-level function defs but NO class defs, wrap
+    If code has top-level function defs but NO class defs, wrap
     everything in a synthetic class so the adapter produces a real CIR.
-    The class name comes from the filename stem (auth.py -> Auth).
-    Returns code unchanged if classes already exist or code is unparseable.
     """
     try:
         tree = ast.parse(code)
@@ -148,7 +146,7 @@ _OPTIONAL_PREFIXES = (
 
 
 # ---------------------------------------------------------------------------
-# FIX A: Package extraction — derive a clean logical package name from filepath
+# Package extraction — derive a clean logical package name from filepath
 # ---------------------------------------------------------------------------
 
 def _extract_package(filepath: Optional[str]) -> str:
@@ -451,14 +449,6 @@ def _extract_init_self_fields(
 ) -> List[Dict[str, Any]]:
     """
     Extract self.x = ... assignments from __init__ and determine their types.
-
-    FIX v2: build a param_type_map from __init__ parameter annotations so that
-    patterns like:
-        def __init__(self, repo: UserRepository):
-            self.repo = repo          # ← type inferred as UserRepository
-    produce Field.type_name = 'UserRepository' instead of 'Any'.
-    This enables CALLS and ASSOCIATES edge resolution for dependency-injected
-    collaborators, which is the dominant pattern in Python service classes.
     """
     # Build param name → annotated type from __init__ signature
     param_type_map: Dict[str, str] = {}
@@ -501,7 +491,6 @@ def _extract_init_self_fields(
                     name = tgt.attr
                     if name not in seen:
                         seen.add(name)
-                        # FIX: if RHS is a plain name that matches an annotated
                         # __init__ param, use that param's type instead of Any
                         logical, raw, mult = _infer_rhs_type(stmt.value)
                         if (logical in ("Any",) and isinstance(stmt.value, ast.Name)
