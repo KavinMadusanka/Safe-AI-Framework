@@ -38,6 +38,7 @@ for nm in _list_models():
         CANDIDATES.append(nm)
         _seen.add(nm)
 
+#This controls AI output - Must return code only, use fenced block, include full code, Multi-file format supported
 SYSTEM_NUDGE = (
     "Return EXACTLY ONE fenced code block with the appropriate language identifier. "
     "If multiple files are needed, concatenate them inside a single ```txt fence using:\n"
@@ -46,6 +47,7 @@ SYSTEM_NUDGE = (
     "No prose before/after the fence. CRITICAL: Generate COMPLETE code - never truncate or use placeholders."
 )
 
+#Control AI behavior - Low temperature → stable output, High tokens → long code
 GEN_CFG = {
     "temperature": 0.3,
     "max_output_tokens": 16384,
@@ -53,6 +55,7 @@ GEN_CFG = {
     "top_k": 40,
 }
 
+#Disable blocking filters
 SAFETY = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -60,6 +63,7 @@ SAFETY = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
+#Creates model instance
 def _init_model(name: str):
     m = genai.GenerativeModel(name)
     try:
@@ -82,6 +86,7 @@ def _pick_model() -> str:
 _MODEL_NAME = _pick_model()
 _MODEL = _init_model(_MODEL_NAME)
 
+#The system ensures reliability by switching to alternative models if the current one fails.
 def _fallback_after(curr: str) -> str:
     try:
         i = CANDIDATES.index(curr)
@@ -125,6 +130,7 @@ def _diagnostic(resp) -> str:
         msg += "// Safety filter triggered. Adjust prompt to be more neutral.\n"
     return _ensure_single_fence(msg)
 
+#Generate code using AI with retry + fallback
 async def stream_code(prompt: str) -> AsyncIterator[str]:
     """Generate code with retry logic and streaming fallback. Always one fenced block."""
     global _MODEL, _MODEL_NAME
