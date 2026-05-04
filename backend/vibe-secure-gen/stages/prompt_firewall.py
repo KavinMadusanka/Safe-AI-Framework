@@ -1,6 +1,7 @@
 import re
 from typing import List, Dict
 
+#Detecting and sanitizing malicious user prompts before they reach the AI model
 # Lightweight detectors for prompt-injection / jailbreak cues.
 SUSPECT_PATTERNS: Dict[str, re.Pattern] = {
     "ignore-rules": re.compile(r"\bignore (all|previous|above) instructions\b", re.I),

@@ -2,6 +2,7 @@ import os
 import re
 from typing import Dict, Tuple, List
 
+# Regex to extract the programming language and code content from AI-generated code blocks
 FENCE_RE = re.compile(r"^```([a-zA-Z0-9_+-]*)\s*\n([\s\S]*?)\n```$", re.M)
 
 EXT_TO_LANG = {
@@ -20,6 +21,7 @@ EXT_TO_LANG = {
     ".txt": "text", ".md": "text",
 }
 
+# separates the language type and code content from the generated response
 def strip_fence(text: str) -> Tuple[str, str]:
     m = FENCE_RE.search(text.strip())
     if not m:
@@ -28,6 +30,7 @@ def strip_fence(text: str) -> Tuple[str, str]:
     inner = (m.group(2) or "").strip()
     return lang, inner
 
+#If the system receives a single code block, it automatically assigns a default file name to maintain structure.
 def _guess_single_fallback_name(fence_lang: str) -> str:
     if fence_lang in ("java","kotlin","python","go","php","ruby","csharp","rust","scala","javascript","typescript"):
         ext = {
@@ -38,6 +41,7 @@ def _guess_single_fallback_name(fence_lang: str) -> str:
         return f"Main{ext}"
     return "Main.txt"
 
+#Split code into multiple files using pattern:
 def split_files(inner: str, fence_lang: str) -> Dict[str, str]:
     sep = re.compile(r"^===\s*FILE:\s*(.+?)\s*===\s*$")
     lines = inner.splitlines()
@@ -67,6 +71,8 @@ def split_files(inner: str, fence_lang: str) -> Dict[str, str]:
     fallback = _guess_single_fallback_name(fence_lang)
     return {fallback: inner}
 
+#creates the actual project structure by writing files into directories,
+#which allows static and dynamic analysis tools to operate on real code
 def materialize_files(root_dir: str, code_blob: str) -> Dict[str, str]:
     fence_lang, inner = strip_fence(code_blob)
     file_map = split_files(inner, fence_lang)

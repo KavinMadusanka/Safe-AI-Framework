@@ -14,6 +14,7 @@ TIMEOUT BUDGET (worst case):
   _TIMEOUT is set to 240s as a safe ceiling.
   Override with DAST_TIMEOUT env var if needed.
 """
+#sends source code to an external DAST service for runtime security analysis and receives vulnerability results.
 
 from __future__ import annotations
 
