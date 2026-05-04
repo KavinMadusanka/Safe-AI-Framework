@@ -1,36 +1,5 @@
 """
-JavaScript / TypeScript → CIRGraph builder.  v3
-
-What's new in v3
-----------------
-Option B: Module-level function extraction
-  Files that contain NO ES6 classes (e.g. Express route files, functional
-  model files, utility modules) are now handled by extracting every exported
-  function and grouping them into a single pseudo-class named after the file.
-
-  Examples
-  --------
-  models/userModel.js   → class  UserModel
-    methods: createUser, findUserByUsername, findUserById
-
-  utils/security.js     → class  Security
-    methods: hashPassword, comparePassword, generateToken, verifyToken
-
-  routes/authRoutes.js  → class  AuthRoutes
-    methods: register (POST /register), login (POST /login)
-
-  server.js             → class  Server  (skipped if < 2 exports)
-
-  Import-resolution also builds CALLS / DEPENDS_ON edges between modules:
-    authRoutes.js imports { createUser } from userModel.js
-    → AuthRoutes CALLS UserModel.createUser
-
-v2 fixes (retained)
--------------------
-  1. Fields restricted to constructor this.x = ... assignments only
-  2. _module_to_package() strips temp dirs → clean package names
-  3. CALLS edges handle this.fieldName.method() two-hop chains
-  4. Esprima fields from PropertyDefinition only
+JavaScript / TypeScript → CIRGraph builder
 """
 
 from __future__ import annotations
@@ -126,7 +95,7 @@ def _resolve_type_and_multiplicity(
     logical = raw.split("<")[0].split(".")[-1]
     return logical, raw, "1"
 
-
+# Esprima-based parameter formatter - handles various parameter patterns
 def _format_params_from_esprima(params: List[Any]) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for p in params:
@@ -372,7 +341,6 @@ def _extract_module_functions(
     full_name  = f"{module_name}.{class_name}" if module_name else class_name
 
     # Build CALLS from import statements
-    # We'll store imports on the unit and resolve them later
     imports = _extract_module_imports(code)
 
     return {
@@ -424,6 +392,7 @@ def _extract_constructor_fields_from_esprima(body: Any) -> List[Dict[str, Any]]:
     return fields
 
 
+# Extract CALLS from method bodies 
 def _extract_calls_from_esprima_body(body: Any) -> List[Dict[str, Any]]:
     calls: List[Dict[str, Any]] = []
     order = 0
@@ -1002,10 +971,6 @@ def _add_relationship_edges(
             elif qkind == "field":
                 var_type = field_type_by_name.get(qual)
                 if not var_type or var_type in _JS_PRIMITIVES:
-                    # FIX: JS has no type annotations so constructor fields
-                    # like `this.userRepository = userRepository` get type 'any'.
-                    # Try resolving the field name directly as a class:
-                    # userRepository -> UserRepository, tokenService -> TokenService
                     # Strategy 1: capitalise first letter
                     candidate = qual[0].upper() + qual[1:] if qual else ""
                     t = resolve(candidate, src_id) if candidate else None
@@ -1218,10 +1183,7 @@ class JSAdapter:
                     units.append(u)
                     existing.add(u["short_name"])
 
-        # ── Pass 4: Module-level function extraction (Option B) ───────────
-        # Runs when NO classes were found (functional-style file OR bare snippet).
-        # FIX: also runs when stem is empty (pasted snippet with no filename),
-        # and skips _SKIP_FILE_STEMS only when we actually have a stem.
+        # ── Pass 4: Module-level function extraction ───────────
         if not units:
             effective_stem = stem if (stem and stem not in _SKIP_FILE_STEMS) else "Snippet"
             pseudo = _extract_module_functions(code, module_name, effective_stem)

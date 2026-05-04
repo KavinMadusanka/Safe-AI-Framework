@@ -35,7 +35,7 @@ def wrap_bare_methods_as_class(
     source_file: str | None = None,
 ) -> str:
     """
-    FIX v2: If code has no class declaration but contains method-like patterns,
+    If code has no class declaration but contains method-like patterns,
     wrap the snippet in a synthetic public class so javalang can parse it.
     Returns code unchanged if it already has a class declaration.
     """
@@ -309,6 +309,7 @@ class JavaAdapter:
         except Exception as e:
             raise ValueError(f"Failed to parse Java code: {e}")
 
+    # CIRGraph builders
     def build_cir_graph_for_code(self, code: str, filename: str | None = None) -> CIRGraph:
         """
         Single-compilation-unit helper (for /parse).

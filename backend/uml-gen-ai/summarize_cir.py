@@ -953,18 +953,6 @@ def _summarize_activity(
 ) -> str:
     """
     Build a rich activity-diagram context for the LLM.
-
-    Key fix vs original:
-      _is_infrastructure_noise() types (DatabaseUtil, PasswordUtil, ConfigUtil,
-      LoggerUtil, *Config, *Util, *Helper …) are now excluded from active_types
-      AND from the call chain.  Previously these stayed in active_types and their
-      CALLS edges (layer=60-70) dominated the sorted chain because the App/Main
-      class (layer=55 default) called them first, producing a shallow 5-7 node
-      diagram that completely missed the real business logic.
-
-    With noise excluded, LibraryService (layer=20), BookDAO/MemberDAO/LoanDAO
-    (layer=30) etc. become the active types and their rich CALLS chains fill
-    the diagram correctly.
     """
 
     # ── Index methods ──────────────────────────────────────────────────────
@@ -1014,17 +1002,6 @@ def _summarize_activity(
         calls_by_src_raw[src_m].sort(key=lambda x: x.get("order", 0))
 
     # ── Exclusion: pure model types AND infrastructure noise ───────────────
-    #
-    # FIX: The original only excluded _is_pure_model(). This left DatabaseUtil
-    # (layer=40), PasswordUtil, ConfigUtil (layer=70) in active_types. The
-    # App/Main class (layer=55 default) calls them first in the CALLS chain,
-    # so their 5-7 methods dominated the entire diagram output. The real
-    # business logic (LibraryService layer=20, BookDAO layer=30 etc.) never
-    # appeared because their CALLS edges came later in the sort.
-    #
-    # Now we exclude infrastructure noise types from active_types AND filter
-    # them from both src and dst positions in the call chain — exactly as the
-    # sequence and component diagram generators already do.
     excluded: Set[str] = set()
     for tid, attrs in type_info.items():
         nm  = _get(attrs, "name",    default="")
@@ -1116,7 +1093,6 @@ def _summarize_activity(
                 "", name
             ).strip()
             if subject:
-                # FIX: preserve acronyms (ISBN, ID, URL) before camelCase split
                 # Step 1: collapse consecutive uppercase sequences into title-case
                 subject = re.sub(r'([A-Z]{2,})', lambda m: m.group(1).title(), subject)
                 # Step 2: now split camelCase normally
