@@ -516,7 +516,7 @@ async def run_pipeline(prompt: str) -> Dict[str, Any]:
                 "remaining_issues":  final_sast,
                 "dast_remaining":    final_dast,
                 "fix_rate_percent":  round(
-                    (total_fixes / initial_issues * 100) if initial_issues > 0 else 100, 1
+                    (sast_fixed / initial_issues * 100) if initial_issues > 0 else 100, 1
                 ),
             },
         },
