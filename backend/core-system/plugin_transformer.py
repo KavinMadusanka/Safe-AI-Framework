@@ -8,6 +8,7 @@ Key fix in v5: JSX is extracted ONLY from inside the return(...) block.
 All JS logic (useState, handlers) is re-built as vanilla JS separately.
 Nothing from the JS logic section leaks into the HTML output.
 """
+# This auto-converts AI-generated code so it works with the plugin runner.
 
 from __future__ import annotations
 import re

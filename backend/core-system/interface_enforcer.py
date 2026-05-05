@@ -2,6 +2,7 @@
 Interface Enforcement Module
 Validates plugin structure, entry API, and permissions before execution.
 """
+# This enforces the contract that every plugin must follow. Nothing runs without passing this.
 
 import json
 import re

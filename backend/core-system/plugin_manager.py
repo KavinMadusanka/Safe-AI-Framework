@@ -1,3 +1,4 @@
+# This is the Docker integration layer. It talks to Docker to manage containers.
 import time
 import re
 import uuid
@@ -51,7 +52,8 @@ def _wait_for_port(container, inner_port: str = "9000/tcp", timeout: int = 15) -
                 f"Container '{container.name}' stopped unexpectedly.\n"
                 f"Last logs:\n{logs}"
             )
-
+        
+        # Polls the container every 0.4 seconds until Docker assigns a host port to the container's port 9000.
         ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
         bindings = ports.get(inner_port)
         if bindings:

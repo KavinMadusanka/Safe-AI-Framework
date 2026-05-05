@@ -1,3 +1,5 @@
+# This is the REST API layer for the plugin lifecycle. Every plugin operation goes through here.
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import json

@@ -1,4 +1,6 @@
 # SAFE-AI-FRAMEWORK/backend/main.py
+# This is the main FastAPI application file. It is the entry point of the core system backend.
+
 from pathlib import Path
 from datetime import datetime
 import os
@@ -70,7 +72,7 @@ class DockerStartReq(BaseModel):
     image: str = "node:18-alpine"             # base image (override if needed)
     name: Optional[str] = None                # docker --name
     workdir: str = "/app"                     # container working directory
-    # ⬇️ Only install if node_modules is missing
+    # Only install if node_modules is missing
     install: str = (
         "if [ -d node_modules ]; then "
         "  echo 'node_modules present — skipping install'; "

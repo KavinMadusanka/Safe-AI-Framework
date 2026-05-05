@@ -1,3 +1,5 @@
+# This handles all file system operations for the uploaded project.
+
 from fastapi import APIRouter, HTTPException
 import os
 

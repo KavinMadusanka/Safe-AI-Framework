@@ -1,4 +1,5 @@
 # SAFE-AI-FRAMEWORK/backend/process_registry.py
+# This is the shared state module. It defines all paths and PID management.
 from pathlib import Path
 from typing import Optional, List, Dict
 import json, psutil, shutil
